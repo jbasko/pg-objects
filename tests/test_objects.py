@@ -1,4 +1,4 @@
-from pg_objects.objects import Setup
+from pg_objects.objects import Setup, ServerState
 
 
 def test_simple_setup():
@@ -13,13 +13,8 @@ def test_simple_setup():
     setup.database("datascience", owner="datascience")
     setup.schema(database="datascience", name="private", owner="datascience")
 
-    graph = setup.generate_graph()
-    print(graph)
+    # Fake state
+    setup._server_state = ServerState()
 
-    for i, v in enumerate(graph.topological_sort_by_kahn()):
-        print(i, v.value)
-
-    print("--")
-
-    for i, v in enumerate(reversed(graph.topological_sort_by_kahn())):
-        print(i, v.value)
+    for stmt in setup.generate_stmts():
+        print(stmt)

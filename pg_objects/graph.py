@@ -110,7 +110,8 @@ class Graph:
         if G.has_edges():
             raise ValueError("Graph has at least one cycle")
 
-        return L
+        # Return the vertices of the original graph, not the clone
+        return [self[v.value] for v in L]
 
 
 def graph_definition_example1():
