@@ -42,7 +42,17 @@ Dependencies:
 ```
 
 The separation of database from database ownership allows us to remove the owner of the database
-before attempting to drop the database.
+before attempting to drop the database or the user.
+
+The topological order of the vertices of the above graph is:
+
+```yaml
+TopologicalOrder:
+
+    - User:u
+    - Database:d
+    - DatabaseOwner:d+u
+```
 
 
 ### Permissions Model
