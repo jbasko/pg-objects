@@ -62,3 +62,9 @@ are per database, so there is no default privilege we can create to avoid this. 
 created database you have to revoke public group's access to the database.
   
     REVOKE ALL PRIVILEGES ON DATABASE {self.name} FROM GROUP PUBLIC
+
+* No grants -- all privileges to be managed by the super user which runs *pg-objects*.
+* No user-specific privileges -- all privileges are group-specific
+* All referenced groups, users, databases, and schemas should be *managed* -- an object
+  is *managed* if the object graph contains an explicit declaration of the object.
+ 

@@ -395,11 +395,14 @@ class DatabasePrivilege(Object):
             privileges = set(privileges)
         parsed = []
         for p in privileges:
+            p = p.upper()
             if p == "ALL":
                 parsed.extend(self.ALL)
             elif p == "TEMP":
                 parsed.append(self.TEMPORARY)
             else:
+                if p not in self.ALL:
+                    raise ValueError(p)
                 parsed.append(p)
         return set(parsed)
 

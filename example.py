@@ -14,17 +14,17 @@ setup = Setup(master_connection=Connection(
     database=os.environ.get("PGO_DATABASE", "postgres")),
 )
 
-setup.group(name="devops", present=False)
+setup.group(name="devops", present=True)
 setup.group(name="datascience", present=True)
 
-setup.user(name="johnny", password="johnny", groups=["datascience"], present=False)
-setup.user(name="peter", password="peter", groups=["devops"], present=False)
+setup.user(name="johnny", password="johnny", groups=["datascience"], present=True)
+setup.user(name="peter", password="peter", groups=["devops"], present=True)
 
-setup.database("datascience", owner="devops", present=False)
+setup.database("datascience", owner="devops", present=True)
 setup.database("existingdb", present=True)
-setup.schema(database="existingdb", name="existingschema", owner="devops", present=False)
-setup.schema(database="datascience", name="private", owner="devops", present=False)
+setup.schema(database="existingdb", name="existingschema", owner="devops", present=True)
+setup.schema(database="datascience", name="private", owner="devops", present=True)
 
-setup.database_privilege("existingdb", group="datascience", privileges=["CONNECT", "TEMP"], present=False)
+setup.database_privilege("existingdb", group="datascience", privileges=["CONNECT", "TEMP"], present=True)
 
 setup.execute()
