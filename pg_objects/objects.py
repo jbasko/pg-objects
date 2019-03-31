@@ -1,7 +1,7 @@
 import collections
 import hashlib
 import logging
-from typing import List, Generator, Hashable, Dict, Tuple, Union, ClassVar, Optional, Set
+from typing import List, Generator, Hashable, Dict, Tuple, Union, ClassVar, Optional, Set, Collection
 
 from .connection import Connection
 from .graph import Graph
@@ -101,6 +101,11 @@ class Object:
     def __repr__(self):
         return f"<{self.key}>"
 
+    def resolve_owner(self, owner: str) -> "Role":
+        if self.setup is None:
+            return Group(owner)
+        return self.setup.resolve_owner(owner)
+
     def add_to_graph(self, graph: Graph):
         """
         Populate the graph so as to fully represent this object and its state.
@@ -119,6 +124,18 @@ class Object:
         """
         if False:
             yield
+
+    def stmts_to_update(self) -> Generator[Statement, None, None]:
+        """
+        Yield statements that update the object to the desired state.
+
+        These statements are executed if current state is IS_DIFFERENT.
+        Most objects should avoid having a mutable state as it is easier to just
+        create and drop objects.
+
+        By default, create statements are yielded.
+        """
+        yield from self.stmts_to_create()
 
     def stmts_to_drop(self) -> Generator[Statement, None, None]:
         """
@@ -251,7 +268,7 @@ class Database(Object):
         super().__init__(name=name, present=present, setup=setup)
         self.owner = owner
         if self.owner:
-            self.dependencies.add(self.setup.resolve_owner(self.owner))
+            self.dependencies.add(self.resolve_owner(self.owner))
 
     def add_to_graph(self, graph: Graph):
         super().add_to_graph(graph)
@@ -305,7 +322,7 @@ class Schema(Object):
         self.owner = owner
         self.dependencies.add(Database(self.database))
         if self.owner:
-            self.dependencies.add(self.setup.resolve_owner(self.owner))
+            self.dependencies.add(self.resolve_owner(self.owner))
 
     @property
     def key(self):
@@ -337,7 +354,7 @@ class SchemaOwner(ObjectLink):
         self.schema = schema
         self.owner = owner
         self.dependencies.add(Schema(database=self.database, name=self.schema))
-        self.dependencies.add(self.setup.resolve_owner(self.owner))
+        self.dependencies.add(self.resolve_owner(self.owner))
 
     @property
     def key(self):
@@ -350,34 +367,62 @@ class SchemaOwner(ObjectLink):
 class DatabasePrivilege(Object):
     database: str
     group: str
-    privileges: List[str]
+    privileges: Set[str]
+
+    CONNECT = "CONNECT"
+    CREATE = "CREATE"
+    TEMPORARY = "TEMPORARY"
+    ALL = {CONNECT, CREATE, TEMPORARY}
 
     def __init__(
         self,
-        database: str, group: str, privileges: Union[str, List[str]],
+        database: str, group: str, privileges: Union[str, Collection[str]],
         present: bool = True, setup: "Setup" = None,
     ):
         super().__init__(present=present, setup=setup)
         self.database = database
         self.group = group
-        self.privileges = [privileges] if isinstance(privileges, str) else (privileges or [])
+        self.privileges = self._parse_privileges(privileges)
         self.dependencies.add(Database(self.database))
-        self.dependencies.add(self.setup.resolve_owner(self.group))
+        self.dependencies.add(self.resolve_owner(self.group))
+
+    def _parse_privileges(self, privileges: Optional[Union[str, Collection[str]]]):
+        if not privileges:
+            return set()
+        if isinstance(privileges, str):
+            privileges = {privileges}
+        else:
+            privileges = set(privileges)
+        parsed = []
+        for p in privileges:
+            if p == "ALL":
+                parsed.extend(self.ALL)
+            elif p == "TEMP":
+                parsed.append(self.TEMPORARY)
+            else:
+                parsed.append(p)
+        return set(parsed)
 
     @property
     def key(self):
         return f"{self.__class__.__name__}({self.group}@{self.database}:{','.join(sorted(self.privileges))})"
 
     def stmts_to_create(self):
+        if self.privileges != DatabasePrivilege.ALL:
+            # Revoke all privileges before applying the necessary privileges
+            yield TextStatement(f"""
+                REVOKE ALL ON DATABASE {self.database}
+                FROM GROUP {self.group}
+            """)
         yield TextStatement(f"""
-            GRANT {' '.join(self.privileges)}
+            GRANT {', '.join(self.privileges)}
             ON DATABASE {self.database}
             TO GROUP {self.group}
         """)
 
     def stmts_to_drop(self):
         yield TextStatement(f"""
-            REVOKE {' '.join(self.privileges)}
+            REVOKE {', '.join(self.privileges)}
             ON DATABASE {self.database}
             FROM GROUP {self.group}
         """)
@@ -423,12 +468,70 @@ State.IS_UNKNOWN = State("IS_UNKNOWN")
 class ServerState:
     def __init__(self):
         self.databases = {}
-        self.database_privileges = collections.defaultdict(dict)
+        self.database_privileges = collections.defaultdict(lambda: collections.defaultdict(set))
         self.schemas = collections.defaultdict(dict)
         self.groups = {}
         self.users = {}
         self.group_users = collections.defaultdict(list)
         self.user_groups = collections.defaultdict(list)
+
+    def get(self, obj: Object):
+        getter = getattr(self, f"get_{obj.__class__.__name__.lower()}", None)
+        if getter is None:
+            log.warning(f"Requested current state for unsupported object type {obj.__class__}, returning IS_UNKNOWN")
+            return State.IS_UNKNOWN
+        return getter(obj)
+
+    def get_database(self, obj: Database):
+        return State.IS_PRESENT if obj.name in self.databases else State.IS_ABSENT
+
+    def get_databaseowner(self, obj: DatabaseOwner):
+        if obj.database not in self.databases:
+            return State.IS_ABSENT
+        elif self.databases[obj.database]["owner"] == obj.owner:
+            return State.IS_PRESENT
+        else:
+            # TODO (IS_DIFFERENT)
+            # Technically, it is IS_DIFFERENT, but for DatabaseOwner IS_ABSENT is okay
+            # and we don't support IS_DIFFERENT yet
+            return State.IS_ABSENT
+
+    def get_databaseprivilege(self, obj: DatabasePrivilege) -> State:
+        if obj.database in self.database_privileges:
+            if obj.group in self.database_privileges[obj.database]:
+                if obj.privileges == self.database_privileges[obj.database][obj.group]:
+                    return State.IS_PRESENT
+                else:
+                    return State.IS_DIFFERENT
+        return State.IS_ABSENT
+
+    def get_user(self, obj: User) -> State:
+        return State.IS_PRESENT if obj.name in self.users else State.IS_ABSENT
+
+    def get_group(self, obj: Group) -> State:
+        return State.IS_PRESENT if obj.name in self.groups else State.IS_ABSENT
+
+    def get_groupuser(self, obj: GroupUser) -> State:
+        return State.IS_PRESENT if obj.user in self.group_users[obj.group] else State.IS_ABSENT
+
+    def get_schema(self, obj: Schema) -> State:
+        if obj.database in self.schemas:
+            if obj.name in self.schemas[obj.database]:
+                return State.IS_PRESENT
+        return State.IS_ABSENT
+
+    def get_schemaowner(self, obj: SchemaOwner) -> State:
+        if obj.database in self.schemas:
+            if obj.schema in self.schemas[obj.database]:
+                current = self.schemas[obj.database][obj.schema]
+                if obj.owner == current["owner"]:
+                    return State.IS_PRESENT
+                else:
+                    # TODO (IS_DIFFERENT)
+                    # It's okay to report it as absent,
+                    # we don't support IS_DIFFERENT yet
+                    return State.IS_ABSENT
+        return State.IS_ABSENT
 
 
 class Setup:
@@ -609,72 +712,31 @@ class Setup:
                     "database": datname, "name": raw["name"], "owner": raw["owner"],
                 }
 
-        # TODO Select HAS_DATABASE_PRIVILEGE for all groups and databases as instructed at
-        # https://stackoverflow.com/questions/44424926/postgresql-list-databases-user-has-privilege-to-connect
-        # for datname in self.managed_databases:
-        #     raise NotImplementedError()
+        for priv_type in ("CONNECT", "CREATE", "TEMPORARY"):
+            raw_rows = self._mc.execute(f"""
+                SELECT
+                    r.rolname,
+                    (
+                        SELECT string_agg(d.datname, ',' ORDER BY d.datname) 
+                        FROM pg_database d 
+                        WHERE HAS_DATABASE_PRIVILEGE(r.rolname, d.datname, %s)
+                        AND NOT d.datname LIKE 'template%%' AND d.datname != 'postgres'
+                    ) AS databases
+                FROM pg_roles r
+                WHERE NOT r.rolcanlogin AND NOT (r.rolname LIKE 'pg_%%')
+                ORDER BY r.rolname
+            """, priv_type).get_all("rolname", "databases")
+            for raw in raw_rows:
+                if not raw["databases"]:
+                    continue
+                for datname in raw["databases"].split(","):
+                    self._server_state.database_privileges[datname][raw["rolname"]].add(priv_type)
 
     def get_current_state(self, obj: Object) -> State:
         """
-        Queries database cluster and returns the current state of the object (one of the CurrentState values).
+        Queries database cluster and returns the current state of the object (one of the State values).
         """
-
-        if isinstance(obj, Database):
-            if obj.name in self._server_state.databases:
-                return State.IS_PRESENT
-            else:
-                return State.IS_ABSENT
-
-        elif isinstance(obj, DatabaseOwner):
-            if obj.database not in self._server_state.databases:
-                return State.IS_ABSENT
-            elif self._server_state.databases[obj.database]["owner"] == obj.owner:
-                return State.IS_PRESENT
-            else:
-                # TODO (IS_DIFFERENT)
-                # Technically, it is IS_DIFFERENT, but for DatabaseOwner IS_ABSENT is okay
-                # and we don't support IS_DIFFERENT yet
-                return State.IS_ABSENT
-
-        elif isinstance(obj, User):
-            if obj.name in self._server_state.users:
-                return State.IS_PRESENT
-            else:
-                return State.IS_ABSENT
-
-        elif isinstance(obj, Group):
-            if obj.name in self._server_state.groups:
-                return State.IS_PRESENT
-            else:
-                return State.IS_ABSENT
-
-        elif isinstance(obj, GroupUser):
-            if obj.user in self._server_state.group_users[obj.group]:
-                return State.IS_PRESENT
-            else:
-                return State.IS_ABSENT
-
-        elif isinstance(obj, Schema):
-            if obj.database in self._server_state.schemas:
-                if obj.name in self._server_state.schemas[obj.database]:
-                    return State.IS_PRESENT
-            return State.IS_ABSENT
-
-        elif isinstance(obj, SchemaOwner):
-            if obj.database in self._server_state.schemas:
-                if obj.schema in self._server_state.schemas[obj.database]:
-                    current = self._server_state.schemas[obj.database][obj.schema]
-                    if obj.owner == current["owner"]:
-                        return State.IS_PRESENT
-                    else:
-                        # TODO (IS_DIFFERENT)
-                        # It's okay to report it as absent,
-                        # we don't support IS_DIFFERENT yet
-                        return State.IS_ABSENT
-            return State.IS_ABSENT
-
-        log.warning(f"Requested current state for unsupported object type {obj.__class__}, returning IS_UNKNOWN")
-        return State.IS_UNKNOWN
+        return self._server_state.get(obj)
 
     def generate_stmts(self) -> Generator[Statement, None, None]:
         objects = self.topological_order()
@@ -693,6 +755,9 @@ class Setup:
 
             elif current_state.is_unknown and obj.present:
                 yield from obj.stmts_to_create()
+
+            elif current_state.is_different and obj.present:
+                yield from obj.stmts_to_update()
 
         # "Maintain" objects in topological order
         for obj in objects:

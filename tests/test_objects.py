@@ -1,4 +1,4 @@
-from pg_objects.objects import Setup, ServerState
+from pg_objects.objects import Setup, ServerState, DatabasePrivilege
 
 
 def test_simple_setup():
@@ -18,3 +18,17 @@ def test_simple_setup():
 
     for stmt in setup.generate_stmts():
         print(stmt)
+
+
+def test_database_privilege():
+    dp = DatabasePrivilege("db", "rol", privileges="ALL")
+    assert dp.privileges == DatabasePrivilege.ALL == {"CONNECT", "CREATE", "TEMPORARY"}
+
+    dp = DatabasePrivilege("db", "rol", privileges="CONNECT")
+    assert dp.privileges == {"CONNECT"}
+
+    dp = DatabasePrivilege("db", "rol", privileges=["CONNECT", "TEMPORARY"])
+    assert dp.privileges == {"CONNECT", "TEMPORARY"}
+
+    dp = DatabasePrivilege("db", "rol", privileges=["CONNECT", "TEMP"])
+    assert dp.privileges == {"CONNECT", "TEMPORARY"}
