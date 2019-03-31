@@ -1,6 +1,7 @@
 import collections
+import hashlib
 import logging
-from typing import List, Generator, Hashable, Dict, Tuple, Union, ClassVar, Type, Optional, Set
+from typing import List, Generator, Hashable, Dict, Tuple, Union, ClassVar, Optional, Set
 
 from .connection import Connection
 from .graph import Graph
@@ -178,9 +179,15 @@ class Group(Role):
 
 class User(Role):
     groups: List[str]
+    password: str
 
-    def __init__(self, name, groups: List[str] = None, present: bool = True, setup: "Setup" = None):
+    def __init__(
+        self,
+        name, password: str = None, groups: List[str] = None,
+        present: bool = True, setup: "Setup" = None,
+    ):
         super().__init__(name=name, present=present, setup=setup)
+        self.password = password
         self.groups = groups or []
         for group in self.groups:
             self.dependencies.add(Group(group))
@@ -192,6 +199,23 @@ class User(Role):
                 group=group, user=self.name,
                 present=self.present, setup=self.setup,
             ).add_to_graph(graph)
+
+    def stmts_to_maintain(self) -> Generator[Statement, None, None]:
+        yield TextStatement(f"""
+            ALTER USER {self.name}
+            WITH NOCREATEDB NOSUPERUSER
+            {self.get_password_sql()}
+        """)
+
+    def get_password_sql(self):
+        password_sql = "NOLOGIN"
+        if self.password:
+            if self.password.startswith("md5"):
+                password_hash = self.password
+            else:
+                password_hash = "md5" + hashlib.md5(f"{self.password}{self.name}".encode()).hexdigest()
+            password_sql = f"LOGIN PASSWORD '{password_hash}'"
+        return password_sql
 
 
 class GroupUser(ObjectLink):
