@@ -92,11 +92,6 @@ class Object:
     def key(self) -> str:
         return f"{self.__class__.__name__}({self.name})"
 
-    @property
-    def type_key(self) -> Hashable:
-        # Objects that are database-specific should include database name in their type key.
-        return self.__class__
-
     def __hash__(self):
         return hash(self.key)
 
@@ -170,6 +165,14 @@ class Role(Object):
             query=f"REASSIGN OWNED BY {self.name} TO {self.setup.master_user}",
             database=Statement.ALL_DATABASES,
         )
+        yield TextStatement(
+            query=f"REVOKE ALL ON SCHEMA public FROM GROUP {self.name}",
+            database=Statement.ALL_DATABASES
+        )
+        yield TextStatement(
+            query=f"REVOKE ALL ON SCHEMA public FROM GROUP {self.name}",
+            database=self.setup.master_database,
+        )
         yield DropStatement(self)
 
 
@@ -209,7 +212,7 @@ class User(Role):
 
     def get_password_sql(self):
         # If password is not set, the password is not updated and is not disabled either.
-        password_sql = ""
+        password_sql = "LOGIN"
         if self.password:
             if self.password.startswith("md5"):
                 password_hash = self.password
@@ -308,10 +311,6 @@ class Schema(Object):
     def key(self):
         return f"{self.__class__.__name__}({self.database}.{self.name})"
 
-    @property
-    def type_key(self) -> Hashable:
-        return self.__class__, self.database
-
     def add_to_graph(self, graph: Graph):
         super().add_to_graph(graph)
         if self.owner:
@@ -344,12 +343,44 @@ class SchemaOwner(ObjectLink):
     def key(self):
         return f"{self.__class__.__name__}({self.database}.{self.schema}+{self.owner})"
 
-    @property
-    def type_key(self):
-        return self.__class__, self.database
-
     def stmts_to_create(self):
         yield TextStatement(f"ALTER SCHEMA {self.schema} OWNER TO {self.owner}", database=self.database)
+
+
+class DatabasePrivilege(Object):
+    database: str
+    group: str
+    privileges: List[str]
+
+    def __init__(
+        self,
+        database: str, group: str, privileges: Union[str, List[str]],
+        present: bool = True, setup: "Setup" = None,
+    ):
+        super().__init__(present=present, setup=setup)
+        self.database = database
+        self.group = group
+        self.privileges = [privileges] if isinstance(privileges, str) else (privileges or [])
+        self.dependencies.add(Database(self.database))
+        self.dependencies.add(self.setup.resolve_owner(self.group))
+
+    @property
+    def key(self):
+        return f"{self.__class__.__name__}({self.group}@{self.database}:{','.join(sorted(self.privileges))})"
+
+    def stmts_to_create(self):
+        yield TextStatement(f"""
+            GRANT {' '.join(self.privileges)}
+            ON DATABASE {self.database}
+            TO GROUP {self.group}
+        """)
+
+    def stmts_to_drop(self):
+        yield TextStatement(f"""
+            REVOKE {' '.join(self.privileges)}
+            ON DATABASE {self.database}
+            FROM GROUP {self.group}
+        """)
 
 
 class State(str):
@@ -392,6 +423,7 @@ State.IS_UNKNOWN = State("IS_UNKNOWN")
 class ServerState:
     def __init__(self):
         self.databases = {}
+        self.database_privileges = collections.defaultdict(dict)
         self.schemas = collections.defaultdict(dict)
         self.groups = {}
         self.users = {}
@@ -412,12 +444,19 @@ class Setup:
         self._connections: Dict[str, Connection] = {}
 
     @property
-    def master_user(self):
+    def master_user(self) -> str:
         """
         Master user becomes the owner of objects owned by to be dropped owners
         for which no new owner is set.
         """
         return self._mc.username
+
+    @property
+    def master_database(self) -> str:
+        """
+        Master database (postgres) is not managed, but some revokes should be issued in that.
+        """
+        return self._mc.database
 
     @property
     def managed_databases(self) -> List[str]:
@@ -474,6 +513,11 @@ class Setup:
         d = Database(name, **kwargs, setup=self)
         self.register(d)
         return d
+
+    def database_privilege(self, name, **kwargs) -> DatabasePrivilege:
+        dp = DatabasePrivilege(name, **kwargs, setup=self)
+        self.register(dp)
+        return dp
 
     def schema(self, name, *, database, **kwargs) -> Schema:
         s = Schema(name=name, database=database, **kwargs, setup=self)
@@ -565,6 +609,11 @@ class Setup:
                     "database": datname, "name": raw["name"], "owner": raw["owner"],
                 }
 
+        # TODO Select HAS_DATABASE_PRIVILEGE for all groups and databases as instructed at
+        # https://stackoverflow.com/questions/44424926/postgresql-list-databases-user-has-privilege-to-connect
+        # for datname in self.managed_databases:
+        #     raise NotImplementedError()
+
     def get_current_state(self, obj: Object) -> State:
         """
         Queries database cluster and returns the current state of the object (one of the CurrentState values).
@@ -624,8 +673,8 @@ class Setup:
                         return State.IS_ABSENT
             return State.IS_ABSENT
 
-        log.warning(f"Requested current state for unsupported object type {obj.__class__}, returning IS_ABSENT")
-        return State.IS_ABSENT
+        log.warning(f"Requested current state for unsupported object type {obj.__class__}, returning IS_UNKNOWN")
+        return State.IS_UNKNOWN
 
     def generate_stmts(self) -> Generator[Statement, None, None]:
         objects = self.topological_order()

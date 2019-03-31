@@ -15,14 +15,16 @@ setup = Setup(master_connection=Connection(
 )
 
 setup.group(name="devops", present=True)
-setup.group(name="datascience")
+setup.group(name="datascience", present=False)
 
-setup.user(name="johnny", password="johnny", groups=["datascience"], present=True)
-setup.user(name="peter", groups=["datascience", "devops"])
+setup.user(name="johnny", password="johnny", groups=["datascience"], present=False)
+setup.user(name="peter", password="peter", groups=["devops"])
 
-setup.database("datascience", owner="datascience", present=True)
-setup.database("existingdb", present=False)
-setup.schema(database="existingdb", name="existingschema", owner="devops", present=False)
-setup.schema(database="datascience", name="private", owner="devops", present=False)
+setup.database("datascience", owner="devops", present=True)
+setup.database("existingdb", present=True)
+setup.schema(database="existingdb", name="existingschema", owner="devops", present=True)
+setup.schema(database="datascience", name="private", owner="devops", present=True)
+
+setup.database_privilege("existingdb", group="datascience", privileges="ALL", present=False)
 
 setup.execute()
