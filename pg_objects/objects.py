@@ -173,21 +173,28 @@ class Role(Object):
     Do not use directly, instead use Group or User.
     """
 
+    FORBIDDEN_ROLES = {"public", "postgres"}
+
     def stmts_to_create(self):
+        if self.name.lower() in self.FORBIDDEN_ROLES or self.name.startswith("pg_"):
+            return
         yield CreateStatement(self)
 
     def stmts_to_drop(self):
+        if self.name.lower()  in self.FORBIDDEN_ROLES or self.name.startswith("pg_"):
+            return
+
         # TODO Add "reassign_to" attribute which would be used in these cases
         yield TextStatement(
             query=f"REASSIGN OWNED BY {self.name} TO {self.setup.master_user}",
             database=Statement.ALL_DATABASES,
         )
         yield TextStatement(
-            query=f"REVOKE ALL ON SCHEMA public FROM GROUP {self.name}",
+            query=f"REVOKE ALL ON SCHEMA public FROM {self.name}",
             database=Statement.ALL_DATABASES
         )
         yield TextStatement(
-            query=f"REVOKE ALL ON SCHEMA public FROM GROUP {self.name}",
+            query=f"REVOKE ALL ON SCHEMA public FROM {self.name}",
             database=self.setup.master_database,
         )
         yield DropStatement(self)
@@ -285,11 +292,17 @@ class Database(Object):
         yield DropStatement(self)
 
     def stmts_to_maintain(self):
-        # We don't allow public access to managed databases
+        # We don't allow public access to managed databases.
+        # TODO At the moment there is no cleaner way to do this
+        # TODO because we are not loading current privileges of public group
+        # TODO as it does not appear in pg_roles.
+        # TODO Also, a new database wouldn't have existed at the time when
+        # TODO we load server state so we wouldn't have detected state change
+        # TODO if we requested an implicit DatabasePrivilege to be absent.
         yield TextStatement(f"""
             REVOKE ALL PRIVILEGES
             ON DATABASE {self.name}
-            FROM GROUP PUBLIC
+            FROM GROUP public
         """)
 
 
@@ -626,6 +639,22 @@ class Setup:
         # Connections by database except the master connection which is self._mc
         self._connections: Dict[str, Connection] = {}
 
+        for obj in self.get_implicit_objects():
+            self.register(obj)
+
+    def get_implicit_objects(self) -> List[Object]:
+        """
+        Returns a list of objects that are not managed (created, updated, dropped) by us,
+        but they may be referenced by managed objects and therefore need to be in the
+        object graph.
+        """
+        return [
+            # public group is the group to which all roles belong.
+            # We need to revoke some privileges which are assigned to it by default
+            # in all new databases.
+            Group(name="public"),
+        ]
+
     @property
     def master_user(self) -> str:
         """
@@ -719,6 +748,8 @@ class Setup:
             return group
         elif user in self:
             return user
+        if owner.lower() == "public":
+            return Group("public")
         raise ValueError(
             f"Ambiguous owner {owner!r} - "
             f"declare it as Group or User before referencing it as owner of another object"
@@ -802,7 +833,7 @@ class Setup:
                 SELECT
                     r.rolname,
                     (
-                        SELECT string_agg(d.datname, ',' ORDER BY d.datname) 
+                        SELECT STRING_AGG(d.datname, ',' ORDER BY d.datname) 
                         FROM pg_database d 
                         WHERE HAS_DATABASE_PRIVILEGE(r.rolname, d.datname, %s)
                         AND NOT d.datname LIKE 'template%%' AND d.datname != 'postgres'
@@ -826,7 +857,7 @@ class Setup:
                     SELECT
                         r.rolname,
                         (
-                            SELECT string_agg(s.nspname, ',' ORDER BY s.nspname)
+                            SELECT STRING_AGG(s.nspname, ',' ORDER BY s.nspname)
                             FROM pg_namespace s 
                             WHERE HAS_SCHEMA_PRIVILEGE(r.rolname, s.nspname, %s)
                             AND s.nspname != 'information_schema'
