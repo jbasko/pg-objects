@@ -133,6 +133,16 @@ class Object:
         if False:
             yield
 
+    def stmts_to_maintain(self) -> Generator[Statement, None, None]:
+        """
+        Yields statements that should be executed on every run if the object is to be present.
+
+        You should use these only when the statements don't belong to creation, and
+        it's not easy to detect the current state and express this state as a separate object.
+        """
+        if False:
+            yield
+
 
 class ObjectLink(Object):
     def __init__(self, present: bool = True, setup: "Setup" = None):
@@ -171,7 +181,9 @@ class User(Role):
 
     def __init__(self, name, groups: List[str] = None, present: bool = True, setup: "Setup" = None):
         super().__init__(name=name, present=present, setup=setup)
-        self.groups = groups
+        self.groups = groups or []
+        for group in self.groups:
+            self.dependencies.add(Group(group))
 
     def add_to_graph(self, graph: Graph):
         super().add_to_graph(graph)
@@ -210,6 +222,8 @@ class Database(Object):
     def __init__(self, name, owner: str = None, present: bool = True, setup: "Setup" = None):
         super().__init__(name=name, present=present, setup=setup)
         self.owner = owner
+        if self.owner:
+            self.dependencies.add(self.setup.resolve_owner(self.owner))
 
     def add_to_graph(self, graph: Graph):
         super().add_to_graph(graph)
@@ -224,6 +238,14 @@ class Database(Object):
 
     def stmts_to_drop(self):
         yield DropStatement(self)
+
+    def stmts_to_maintain(self):
+        # We don't allow public access to managed databases
+        yield TextStatement(f"""
+            REVOKE ALL PRIVILEGES
+            ON DATABASE {self.name}
+            FROM GROUP PUBLIC
+        """)
 
 
 class DatabaseOwner(ObjectLink):
@@ -254,6 +276,8 @@ class Schema(Object):
         self.database = database
         self.owner = owner
         self.dependencies.add(Database(self.database))
+        if self.owner:
+            self.dependencies.add(self.setup.resolve_owner(self.owner))
 
     @property
     def key(self):
@@ -380,9 +404,17 @@ class Setup:
     def register(self, obj: Object):
         assert obj not in self
         assert not isinstance(obj, ObjectLink)
+
+        # Check dependencies
+        # We cannot check dependencies of ObjectLink because they are not stored in self._objects.
+        # We cannot check dep.present because the dependency objects don't know anything about the
+        # desired state.
         for dep in obj.dependencies:
             if dep not in self:
                 raise ValueError(f"{obj} depends on {dep} but it is not managed by this setup")
+            if obj.present and not self.get(dep).present:
+                raise ValueError(f"{obj} depends on {dep} but it is marked as not present")
+
         self._objects[obj.key] = obj
 
     def get(self, obj_or_key: Union[Object, Hashable]) -> Optional[Object]:
@@ -457,16 +489,14 @@ class Setup:
         for raw in self._mc.execute("SELECT groname AS name FROM pg_group").get_all("name"):
             if raw["name"].startswith("pg_"):
                 continue
-            group = Group(raw["name"])
-            self._server_state.groups[group.name] = group
+            self._server_state.groups[raw["name"]] = raw
 
         for raw in self._mc.execute("SELECT rolname AS name FROM pg_roles").get_all("name"):
             if raw["name"].startswith("pg_") or raw["name"] in self._server_state.groups:
                 # pg_roles contains both users and groups so the only way to distinguish
                 # them is by checking which ones are not groups.
                 continue
-            user = User(raw["name"])
-            self._server_state.users[user.name] = user
+            self._server_state.users[raw["name"]] = raw
 
         raw_rows = self._mc.execute(f"""
             SELECT
@@ -487,8 +517,7 @@ class Setup:
             FROM pg_catalog.pg_database d
         """).get_all("name", "owner")
         for raw in raw_rows:
-            database = Database(raw["name"], owner=raw["owner"])
-            self._server_state.databases[database.name] = database
+            self._server_state.databases[raw["name"]] = raw
 
         for datname in self._server_state.databases.keys():
             if datname not in self.managed_databases:
@@ -507,8 +536,9 @@ class Setup:
                 ORDER BY pg_namespace.nspname
             """).get_all("name", "owner")
             for raw in raw_rows:
-                schema = Schema(database=datname, name=raw["name"], owner=raw["owner"])
-                self._server_state.schemas[datname][schema.name] = schema
+                self._server_state.schemas[datname][raw["name"]] = {
+                    "database": datname, "name": raw["name"], "owner": raw["owner"],
+                }
 
     def get_current_state(self, obj: Object) -> State:
         """
@@ -524,7 +554,7 @@ class Setup:
         elif isinstance(obj, DatabaseOwner):
             if obj.database not in self._server_state.databases:
                 return State.IS_ABSENT
-            elif self._server_state.databases[obj.database].owner == obj.owner:
+            elif self._server_state.databases[obj.database]["owner"] == obj.owner:
                 return State.IS_PRESENT
             else:
                 # TODO (IS_DIFFERENT)
@@ -560,7 +590,7 @@ class Setup:
             if obj.database in self._server_state.schemas:
                 if obj.schema in self._server_state.schemas[obj.database]:
                     current = self._server_state.schemas[obj.database][obj.schema]
-                    if obj.owner == current.owner:
+                    if obj.owner == current["owner"]:
                         return State.IS_PRESENT
                     else:
                         # TODO (IS_DIFFERENT)
@@ -589,6 +619,11 @@ class Setup:
 
             elif current_state.is_unknown and obj.present:
                 yield from obj.stmts_to_create()
+
+        # "Maintain" objects in topological order
+        for obj in objects:
+            if obj.present:
+                yield from obj.stmts_to_maintain()
 
         log.debug("Graph in reverse topological order to DROP objects:")
         for i, obj in enumerate(reversed(objects)):

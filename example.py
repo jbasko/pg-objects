@@ -14,11 +14,11 @@ setup = Setup(master_connection=Connection(
     database=os.environ.get("PGO_DATABASE", "postgres")),
 )
 
-setup.group(name="devops", present=False)
+setup.group(name="devops", present=True)
 setup.group(name="datascience")
 
 setup.user(name="johnny", groups=["datascience"], present=True)
-setup.user(name="peter", groups=["datascience"])
+setup.user(name="peter", groups=["datascience", "devops"])
 
 setup.database("datascience", owner="datascience", present=True)
 setup.database("existingdb", present=False)
