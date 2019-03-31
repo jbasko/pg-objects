@@ -208,7 +208,8 @@ class User(Role):
         """)
 
     def get_password_sql(self):
-        password_sql = "NOLOGIN"
+        # If password is not set, the password is not updated and is not disabled either.
+        password_sql = ""
         if self.password:
             if self.password.startswith("md5"):
                 password_hash = self.password

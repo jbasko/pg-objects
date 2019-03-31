@@ -17,7 +17,7 @@ setup = Setup(master_connection=Connection(
 setup.group(name="devops", present=True)
 setup.group(name="datascience")
 
-setup.user(name="johnny", groups=["datascience"], present=True)
+setup.user(name="johnny", password="johnny", groups=["datascience"], present=True)
 setup.user(name="peter", groups=["datascience", "devops"])
 
 setup.database("datascience", owner="datascience", present=True)
