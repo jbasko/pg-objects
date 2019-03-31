@@ -1,7 +1,7 @@
 import collections
 import hashlib
 import logging
-from typing import List, Generator, Hashable, Dict, Tuple, Union, ClassVar, Optional, Set, Collection
+from typing import List, Generator, Hashable, Dict, Tuple, Union, ClassVar, Optional, Set, Collection, Type
 
 from .connection import Connection
 from .graph import Graph
@@ -366,7 +366,7 @@ class SchemaOwner(ObjectLink):
 
 class DatabasePrivilege(Object):
     database: str
-    group: str
+    grantee: str
     privileges: Set[str]
 
     CONNECT = "CONNECT"
@@ -376,59 +376,90 @@ class DatabasePrivilege(Object):
 
     def __init__(
         self,
-        database: str, group: str, privileges: Union[str, Collection[str]],
+        database: str, grantee: str, privileges: Union[str, Collection[str]],
         present: bool = True, setup: "Setup" = None,
     ):
         super().__init__(present=present, setup=setup)
         self.database = database
-        self.group = group
-        self.privileges = self._parse_privileges(privileges)
+        self.grantee = grantee
+        self.privileges = parse_privileges(privileges, obj_type=self.__class__)
         self.dependencies.add(Database(self.database))
-        self.dependencies.add(self.resolve_owner(self.group))
-
-    def _parse_privileges(self, privileges: Optional[Union[str, Collection[str]]]):
-        if not privileges:
-            return set()
-        if isinstance(privileges, str):
-            privileges = {privileges}
-        else:
-            privileges = set(privileges)
-        parsed = []
-        for p in privileges:
-            p = p.upper()
-            if p == "ALL":
-                parsed.extend(self.ALL)
-            elif p == "TEMP":
-                parsed.append(self.TEMPORARY)
-            else:
-                if p not in self.ALL:
-                    raise ValueError(p)
-                parsed.append(p)
-        return set(parsed)
+        self.dependencies.add(self.resolve_owner(self.grantee))
 
     @property
     def key(self):
-        return f"{self.__class__.__name__}({self.group}@{self.database}:{','.join(sorted(self.privileges))})"
+        return f"{self.__class__.__name__}({self.grantee}@{self.database}:{','.join(sorted(self.privileges))})"
 
     def stmts_to_create(self):
         if self.privileges != DatabasePrivilege.ALL:
             # Revoke all privileges before applying the necessary privileges
             yield TextStatement(f"""
                 REVOKE ALL ON DATABASE {self.database}
-                FROM GROUP {self.group}
+                FROM {self.grantee}
             """)
         yield TextStatement(f"""
             GRANT {', '.join(self.privileges)}
             ON DATABASE {self.database}
-            TO GROUP {self.group}
+            TO {self.grantee}
         """)
 
     def stmts_to_drop(self):
         yield TextStatement(f"""
             REVOKE {', '.join(self.privileges)}
             ON DATABASE {self.database}
-            FROM GROUP {self.group}
+            FROM {self.grantee}
         """)
+
+
+class SchemaPrivilege(Object):
+    database: str
+    schema: str
+    grantee: str
+    privileges: Set[str]
+
+    CREATE = "CREATE"
+    USAGE = "USAGE"
+    ALL = {CREATE, USAGE}
+
+    def __init__(
+        self,
+        database: str, schema: str, grantee: str, privileges: Union[str, Collection[str]],
+        present: bool = True, setup: "Setup" = None,
+    ):
+        super().__init__(present=present, setup=setup)
+        self.database = database
+        self.schema = schema
+        self.grantee = grantee
+        self.privileges = parse_privileges(privileges, obj_type=self.__class__)
+        self.dependencies.add(Database(self.database))
+        self.dependencies.add(Schema(database=self.database, name=self.schema))
+        self.dependencies.add(self.resolve_owner(self.grantee))
+
+    @property
+    def key(self):
+        return (
+            f"{self.__class__.__name__}({self.grantee}@{self.database}.{self.schema}:"
+            f"{','.join(sorted(self.privileges))})"
+        )
+
+    def stmts_to_create(self):
+        if self.privileges != self.ALL:
+            # Revoke all privileges before applying the necessary privileges
+            yield TextStatement(
+                query=f"REVOKE ALL ON SCHEMA {self.schema} FROM {self.grantee}",
+                database=self.database,
+            )
+
+        yield TextStatement(f"""
+            GRANT {', '.join(self.privileges)}
+            ON SCHEMA {self.schema} TO {self.grantee}
+        """, database=self.database)
+
+    def stmts_to_drop(self):
+        yield TextStatement(
+            query=f"REVOKE ALL ON SCHEMA {self.schema} FROM {self.grantee}",
+            database=self.database,
+        )
 
 
 class State(str):
@@ -471,7 +502,14 @@ State.IS_UNKNOWN = State("IS_UNKNOWN")
 class ServerState:
     def __init__(self):
         self.databases = {}
-        self.database_privileges = collections.defaultdict(lambda: collections.defaultdict(set))
+        self.database_privileges = collections.defaultdict(
+            lambda: collections.defaultdict(set)
+        )
+        self.schema_privileges = collections.defaultdict(
+            lambda: collections.defaultdict(
+                lambda: collections.defaultdict(set)
+            )
+        )
         self.schemas = collections.defaultdict(dict)
         self.groups = {}
         self.users = {}
@@ -501,11 +539,21 @@ class ServerState:
 
     def get_databaseprivilege(self, obj: DatabasePrivilege) -> State:
         if obj.database in self.database_privileges:
-            if obj.group in self.database_privileges[obj.database]:
-                if obj.privileges == self.database_privileges[obj.database][obj.group]:
+            if obj.grantee in self.database_privileges[obj.database]:
+                if obj.privileges == self.database_privileges[obj.database][obj.grantee]:
                     return State.IS_PRESENT
                 else:
                     return State.IS_DIFFERENT
+        return State.IS_ABSENT
+
+    def get_schemaprivilege(self, obj: SchemaPrivilege) -> State:
+        if obj.database in self.schema_privileges:
+            if obj.schema in self.schema_privileges[obj.database]:
+                if obj.grantee in self.schema_privileges[obj.database][obj.schema]:
+                    if obj.privileges == self.schema_privileges[obj.database][obj.schema][obj.grantee]:
+                        return State.IS_PRESENT
+                    else:
+                        return State.IS_DIFFERENT
         return State.IS_ABSENT
 
     def get_user(self, obj: User) -> State:
@@ -535,6 +583,35 @@ class ServerState:
                     # we don't support IS_DIFFERENT yet
                     return State.IS_ABSENT
         return State.IS_ABSENT
+
+
+def parse_privileges(privileges: Optional[Union[str, Collection[str]]], obj_type: Type[Object]):
+    if not privileges:
+        return set()
+    if isinstance(privileges, str):
+        privileges = {privileges}
+    else:
+        privileges = set(privileges)
+
+    parsed = []
+
+    for p in privileges:
+        p = p.upper()
+
+        if p == "ALL":
+            parsed.extend(obj_type.ALL)
+            continue
+
+        # Known aliases
+        if p == "TEMP":
+            p = "TEMPORARY"
+
+        if p not in obj_type.ALL:
+            raise ValueError(f"Unsupported privilege {p!r} for {obj_type}")
+
+        parsed.append(p)
+
+    return set(parsed)
 
 
 class Setup:
@@ -620,8 +697,8 @@ class Setup:
         self.register(d)
         return d
 
-    def database_privilege(self, name, **kwargs) -> DatabasePrivilege:
-        dp = DatabasePrivilege(name, **kwargs, setup=self)
+    def database_privilege(self, **kwargs) -> DatabasePrivilege:
+        dp = DatabasePrivilege(**kwargs, setup=self)
         self.register(dp)
         return dp
 
@@ -629,6 +706,11 @@ class Setup:
         s = Schema(name=name, database=database, **kwargs, setup=self)
         self.register(s)
         return s
+
+    def schema_privilege(self, **kwargs) -> SchemaPrivilege:
+        sp = SchemaPrivilege(**kwargs, setup=self)
+        self.register(sp)
+        return sp
 
     def resolve_owner(self, owner: str):
         group = Group(owner)
@@ -715,7 +797,7 @@ class Setup:
                     "database": datname, "name": raw["name"], "owner": raw["owner"],
                 }
 
-        for priv_type in ("CONNECT", "CREATE", "TEMPORARY"):
+        for priv_type in DatabasePrivilege.ALL:
             raw_rows = self._mc.execute(f"""
                 SELECT
                     r.rolname,
@@ -734,6 +816,31 @@ class Setup:
                     continue
                 for datname in raw["databases"].split(","):
                     self._server_state.database_privileges[datname][raw["rolname"]].add(priv_type)
+
+        for datname in self._server_state.databases.keys():
+            if datname not in self.managed_databases:
+                continue
+            conn = self.get_connection(datname)
+            for priv_type in SchemaPrivilege.ALL:
+                raw_rows = conn.execute(f"""
+                    SELECT
+                        r.rolname,
+                        (
+                            SELECT string_agg(s.nspname, ',' ORDER BY s.nspname)
+                            FROM pg_namespace s 
+                            WHERE HAS_SCHEMA_PRIVILEGE(r.rolname, s.nspname, %s)
+                            AND s.nspname != 'information_schema'
+                            AND NOT s.nspname LIKE 'pg_%%'
+                        ) AS schemas
+                    FROM pg_roles r
+                    WHERE NOT r.rolcanlogin AND NOT (r.rolname LIKE 'pg_%%')
+                    ORDER BY r.rolname
+                """, priv_type).get_all("rolname", "schemas")
+                for raw in raw_rows:
+                    if not raw["schemas"]:
+                        continue
+                    for schemaname in raw["schemas"].split(","):
+                        self._server_state.schema_privileges[datname][schemaname][raw["rolname"]].add(priv_type)
 
     def get_current_state(self, obj: Object) -> State:
         """
