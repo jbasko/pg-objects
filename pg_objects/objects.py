@@ -590,7 +590,7 @@ class Setup:
             elif current_state.is_unknown and obj.present:
                 yield from obj.stmts_to_create()
 
-        log.debug("Graph in topological order to DROP objects:")
+        log.debug("Graph in reverse topological order to DROP objects:")
         for i, obj in enumerate(reversed(objects)):
             log.debug(f"  {str(i + 1).zfill(2)} {obj} present={obj.present}")
 
