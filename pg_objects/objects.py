@@ -481,6 +481,14 @@ class SchemaTablesPrivilege(SchemaPrivilege):
 
     Schema "public" is accessible to anyone who has access to the database and we don't manage
     it yet.
+
+    TODO This is incomplete even as is because the current state is not loaded completely.
+    TODO There could still be tables which are not accessible.
+    TODO We actually need to go through all tables in a schema...
+    TODO Maybe we can fix this by fixing the state loader to join from tables.
+    TODO A GOOD IDEA IS TO LOAD ALL TABLES independently and then just issue
+    TODO a repeated grant as soon as not all tables are covered.
+    TODO SELECT * FROM pg_tables;
     """
 
     SELECT = "SELECT"
@@ -511,6 +519,25 @@ class SchemaTablesPrivilege(SchemaPrivilege):
             """,
             database=self.database,
         )
+
+        # TODO Continue here.
+        # TODO The problem is as soon as you create default privileges
+        # TODO you need to drop them when you are dropping roles or
+        # TODO dropping roles will start to fail.
+
+        # # By default, any table created by the owner of the schema in this schema
+        # # should have the same access rights as the ones being granted.
+        # schema_owner = self.setup.get(Schema(database=self.database, name=self.schema)).owner
+        # yield TextStatement(
+        #     query=f"""
+        #         ALTER DEFAULT PRIVILEGES
+        #         FOR ROLE {schema_owner}
+        #         IN SCHEMA {self.schema}
+        #         GRANT {', '.join(self.privileges)} ON ALL TABLES
+        #         TO {self.grantee}
+        #     """,
+        #     database=self.database,
+        # )
 
     def stmts_to_drop(self):
         yield TextStatement(
