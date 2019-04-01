@@ -34,3 +34,5 @@ setup.schema_privilege(database="existingdb", schema="existingschema", grantee="
 setup.schema_tables_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=True)
 
 setup.execute()
+
+# setup._server_state.pprint()

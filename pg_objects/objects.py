@@ -477,18 +477,11 @@ class SchemaPrivilege(Object):
 
 class SchemaTablesPrivilege(SchemaPrivilege):
     """
-    Currently we support ALL TABLES privilege only - you cannot specify an individual table.
+    SchemaTablesPrivilege applies to ALL TABLES of a schema.
+    We do not intend to support custom privileges on individual tables.
 
     Schema "public" is accessible to anyone who has access to the database and we don't manage
     it yet.
-
-    TODO This is incomplete even as is because the current state is not loaded completely.
-    TODO There could still be tables which are not accessible.
-    TODO We actually need to go through all tables in a schema...
-    TODO Maybe we can fix this by fixing the state loader to join from tables.
-    TODO A GOOD IDEA IS TO LOAD ALL TABLES independently and then just issue
-    TODO a repeated grant as soon as not all tables are covered.
-    TODO SELECT * FROM pg_tables;
     """
 
     SELECT = "SELECT"
@@ -590,24 +583,45 @@ State.IS_UNKNOWN = State("IS_UNKNOWN")
 class ServerState:
     def __init__(self):
         self.databases = {}
+
+        # [database][grantee] => Set[privileges]
         self.database_privileges = collections.defaultdict(
             lambda: collections.defaultdict(set)
         )
+
+        # [database][schema] => {}
         self.schemas = collections.defaultdict(dict)
+
+        # [database][schema][grantee] => Set[privileges]
         self.schema_privileges = collections.defaultdict(
             lambda: collections.defaultdict(
                 lambda: collections.defaultdict(set)
             )
         )
+
+        # [database][schema][table] => {}
+        self.schema_tables = collections.defaultdict(
+            lambda: collections.defaultdict(dict)
+        )
+
+        # [database][schema][grantee][table] => Set[privileges]
         self.schema_tables_privileges = collections.defaultdict(
             lambda: collections.defaultdict(
-                lambda: collections.defaultdict(set)
+                lambda: collections.defaultdict(
+                    lambda: collections.defaultdict(set)
+                )
             )
         )
         self.groups = {}
         self.users = {}
         self.group_users = collections.defaultdict(list)
         self.user_groups = collections.defaultdict(list)
+
+    def pprint(self):
+        from pprint import pprint
+        for k, v in self.__dict__.items():
+            print(k, ":")
+            pprint(dict(v), indent=2)
 
     def get(self, obj: Object):
         getter = getattr(self, f"get_{obj.__class__.__name__.lower()}", None)
@@ -654,8 +668,10 @@ class ServerState:
         stp = self.schema_tables_privileges
         if obj.database in stp:
             if obj.schema in stp[obj.database]:
+                tables = self.schema_tables[obj.database][obj.schema]
                 if obj.grantee in stp[obj.database][obj.schema]:
-                    if obj.privileges == stp[obj.database][obj.schema][obj.grantee]:
+                    # Have to check that privileges for each existing table match the expected ones
+                    if all(stp[obj.database][obj.schema][obj.grantee][t] == obj.privileges for t in tables):
                         return State.IS_PRESENT
                     else:
                         return State.IS_DIFFERENT
@@ -949,6 +965,10 @@ class Setup:
             if datname not in self.managed_databases:
                 continue
             conn = self.get_connection(datname)
+
+            #
+            # Load schema privileges
+            #
             for priv_type in SchemaPrivilege.ALL:
                 raw_rows = conn.execute(f"""
                     SELECT
@@ -970,10 +990,24 @@ class Setup:
                     for schemaname in raw["schemas"].split(","):
                         state.schema_privileges[datname][schemaname][raw["rolname"]].add(priv_type)
 
-        for datname in state.databases.keys():
-            if datname not in self.managed_databases:
-                continue
-            conn = self.get_connection(datname)
+            #
+            # Load schema tables
+            #
+            raw_rows = conn.execute(f"""
+                SELECT schemaname, tablename, tableowner FROM pg_tables
+                WHERE schemaname != 'information_schema' AND NOT schemaname LIKE 'pg_%%' 
+            """).get_all("schemaname", "tablename", "tableowner")
+            for raw in raw_rows:
+                state.schema_tables[datname][raw["schemaname"]][raw["tablename"]] = {
+                    "database": datname,
+                    "schema": raw["schemaname"],
+                    "name": raw["tablename"],
+                    "owner": raw["tableowner"],
+                }
+
+            #
+            # Load schema tables privileges
+            #
             raw_rows = conn.execute(f"""
                 SELECT
                 grantee, table_schema, table_name, STRING_AGG(privilege_type, ',') AS privileges
@@ -984,9 +1018,7 @@ class Setup:
             for raw in raw_rows:
                 if not raw["privileges"]:
                     continue
-                state.schema_tables_privileges[datname][raw["table_schema"]][raw["grantee"]].update(
-                    raw["privileges"].split(",")
-                )
+                state.schema_tables_privileges[datname][raw["table_schema"]][raw["grantee"]][raw["table_name"]] = set(raw["privileges"].split(","))
 
         # TODO Return instead of storing on instance so that it could be reloaded
         self._server_state = state
