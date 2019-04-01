@@ -54,6 +54,9 @@ TopologicalOrder:
     - DatabaseOwner:d+u
 ```
 
+Another major problem is how privileges such as `ON ALL TABLES` apply only to existing tables and for
+tables created later one must `ALTER DEFAULT PRIVILEGES` which require knowing in advance who is going
+to create the objects (tables) to which the default privileges apply.
 
 ### Permissions Model
 
