@@ -33,6 +33,16 @@ class Statement:
         return self.database == self.ALL_DATABASES
 
 
+class TransactionOfStatements(Statement):
+
+    statements: List[Statement]
+
+    def __init__(self, *statements, **kwargs):
+        self.statements = statements
+        self.database = kwargs.pop("database", None)
+        assert not kwargs
+
+
 class TextStatement(Statement):
     def __init__(self, query: str, *params, **kwargs):
         """
@@ -101,10 +111,10 @@ class Object:
     def __repr__(self):
         return f"<{self.key}>"
 
-    def resolve_owner(self, owner: str) -> "Role":
+    def resolve_role(self, rolname: str, present: bool = True) -> "Role":
         if self.setup is None:
-            return Group(owner)
-        return self.setup.resolve_owner(owner)
+            return Group(rolname, present=present)
+        return self.setup.resolve_role(rolname, present=present)
 
     def add_to_graph(self, graph: Graph):
         """
@@ -175,13 +185,23 @@ class Role(Object):
 
     FORBIDDEN_ROLES = {"public", "postgres"}
 
+    def _is_managed(self):
+        if self.name.lower() in self.FORBIDDEN_ROLES:
+            return False
+        if self.name.lower().startswith("pg_"):
+            return False
+        if self.name == self.setup.master_user:
+            return False
+        return True
+
     def stmts_to_create(self):
-        if self.name.lower() in self.FORBIDDEN_ROLES or self.name.startswith("pg_"):
+        if not self._is_managed():
             return
+
         yield CreateStatement(self)
 
     def stmts_to_drop(self):
-        if self.name.lower()  in self.FORBIDDEN_ROLES or self.name.startswith("pg_"):
+        if not self._is_managed():
             return
 
         # TODO Add "reassign_to" attribute which would be used in these cases
@@ -207,17 +227,28 @@ class Group(Role):
 class User(Role):
     groups: List[str]
     password: str
+    inherit: bool
+
+    # Each user with inherit=False (which is the default setting and should not be changed unless
+    # you are fully aware of the default privilege implications) requires an explicit list of
+    # databases they are allowed to connect to because group's CONNECT privilege cannot or isn't passed to user.
+    # Alternatively, you can explicitly declare the DatabasePrivilege for user in the setup.
+    databases: Set[str]
 
     def __init__(
         self,
-        name, password: str = None, groups: List[str] = None,
+        name, password: str = None, groups: List[str] = None, inherit: bool = False, databases: Set[str] = None,
         present: bool = True, setup: "Setup" = None,
     ):
         super().__init__(name=name, present=present, setup=setup)
         self.password = password
         self.groups = groups or []
+        self.inherit = inherit
+        self.databases = set(databases) if databases else set()
         for group in self.groups:
             self.dependencies.add(Group(group))
+        for datname in self.databases:
+            self.dependencies.add(Database(datname))
 
     def add_to_graph(self, graph: Graph):
         super().add_to_graph(graph)
@@ -227,10 +258,24 @@ class User(Role):
                 present=self.present, setup=self.setup,
             ).add_to_graph(graph)
 
+        # Through "databases" attribute user only gets CONNECT privilege.
+        # Other privileges (CREATE, TEMPORARY) need to be assigned via group role
+        # which user should then use to create objects (SET ROLE groupname).
+        for datname in self.databases:
+            DatabasePrivilege(
+                database=datname,
+                grantee=self.name,
+                privileges=DatabasePrivilege.CONNECT,
+                present=self.present,
+                setup=self.setup,
+            ).add_to_graph(graph)
+
     def stmts_to_maintain(self) -> Generator[Statement, None, None]:
+        inherit_sql = "INHERIT" if self.inherit else "NOINHERIT"
         yield TextStatement(f"""
             ALTER USER {self.name}
             WITH NOCREATEDB NOSUPERUSER
+            {inherit_sql}
             {self.get_password_sql()}
         """)
 
@@ -275,7 +320,7 @@ class Database(Object):
         super().__init__(name=name, present=present, setup=setup)
         self.owner = owner
         if self.owner:
-            self.dependencies.add(self.resolve_owner(self.owner))
+            self.dependencies.add(self.resolve_role(self.owner))
 
     def add_to_graph(self, graph: Graph):
         super().add_to_graph(graph)
@@ -315,7 +360,7 @@ class DatabaseOwner(ObjectLink):
         self.database = database
         self.owner = owner
         self.dependencies.add(Database(self.database))
-        self.dependencies.add(setup.resolve_owner(self.owner))
+        self.dependencies.add(setup.resolve_role(self.owner))
 
     @property
     def key(self):
@@ -335,7 +380,7 @@ class Schema(Object):
         self.owner = owner
         self.dependencies.add(Database(self.database))
         if self.owner:
-            self.dependencies.add(self.resolve_owner(self.owner))
+            self.dependencies.add(self.resolve_role(self.owner))
 
     @property
     def key(self):
@@ -367,7 +412,7 @@ class SchemaOwner(ObjectLink):
         self.schema = schema
         self.owner = owner
         self.dependencies.add(Schema(database=self.database, name=self.schema))
-        self.dependencies.add(self.resolve_owner(self.owner))
+        self.dependencies.add(self.resolve_role(self.owner))
 
     @property
     def key(self):
@@ -375,6 +420,87 @@ class SchemaOwner(ObjectLink):
 
     def stmts_to_create(self):
         yield TextStatement(f"ALTER SCHEMA {self.schema} OWNER TO {self.owner}", database=self.database)
+
+
+class DefaultPrivilegeReady(Object):
+    """
+    Base class for privilege classes which support default privileges.
+    """
+
+    database: str
+    schema: str
+    grantee: str
+    privileges: Set[str]
+
+    ALL: ClassVar[Set[str]]
+
+    def get_default_privilege_clause(self, privileges=None, present=None) -> str:
+        """
+        Returns GRANT or REVOKE in the form usable with ALTER DEFAULT PRIVILEGES.
+
+        Pass privileges if you need to request privileges which are different from object's "privileges"
+        attribute value. This is needed for REVOKE ALL statements.
+
+        Pass present=True/False if you need to enforce a GRANT or REVOKE, otherwise
+        the privilege's "present" attribute will be consulted. This is needed for REVOKE ALL statements.
+        """
+        raise NotImplementedError()
+
+
+class DefaultPrivilege(Object):
+    """
+    DefaultPrivilege objects are expressed as a tuple of a privilege that supports default privileges
+    and a grantor. Grantor is the role which will be creating new objects to which the privilege applies.
+    """
+    privilege: DefaultPrivilegeReady
+    grantor: str
+
+    def __init__(self, privilege: DefaultPrivilegeReady, grantor: str, present: bool = True, setup: "Setup" = None):
+        super().__init__(name=None, present=present, setup=setup)
+        self.privilege = privilege
+        self.grantor = grantor
+        self.dependencies.add(self.privilege)
+        self.dependencies.add(self.resolve_role(self.grantor))
+
+    @property
+    def key(self):
+        return f"{self.__class__.__name__}({self.grantor}:{self.privilege.key})"
+
+    def _get_schema_sql(self):
+        if self.privilege.schema:
+            return f"IN SCHEMA {self.privilege.schema}"
+        # TODO If schema is not specified, the default privilege applies to all schemas of the database.
+        # TODO Allowing this needs careful thought and testing.
+        raise ValueError("Global default privileges not supported yet")
+
+    def _get_revoke_all_stmt(self):
+        return TextStatement(
+            query=f"""
+                ALTER DEFAULT PRIVILEGES FOR ROLE {self.grantor}
+                {self._get_schema_sql()}
+                {self.privilege.get_default_privilege_clause(privileges=self.privilege.ALL, present=False)}
+            """,
+            database=self.privilege.database,
+        )
+
+    def stmts_to_maintain(self):
+
+        def get_stmts():
+            # First, revoke all default privileges so that we have a clean slate
+            yield self._get_revoke_all_stmt()
+            yield TextStatement(
+                query=f"""
+                    ALTER DEFAULT PRIVILEGES FOR ROLE {self.grantor}
+                    {self._get_schema_sql()}
+                    {self.privilege.get_default_privilege_clause()}
+                """,
+                database=self.privilege.database,
+            )
+
+        yield TransactionOfStatements(*get_stmts(), database=self.privilege.database)
+
+    def stmts_to_drop(self):
+        yield self._get_revoke_all_stmt()
 
 
 class DatabasePrivilege(Object):
@@ -397,24 +523,28 @@ class DatabasePrivilege(Object):
         self.grantee = grantee
         self.privileges = parse_privileges(privileges, obj_type=self.__class__)
         self.dependencies.add(Database(self.database))
-        self.dependencies.add(self.resolve_owner(self.grantee))
+        self.dependencies.add(self.resolve_role(self.grantee))
 
     @property
     def key(self):
         return f"{self.__class__.__name__}({self.grantee}@{self.database}:{','.join(sorted(self.privileges))})"
 
     def stmts_to_create(self):
-        if self.privileges != DatabasePrivilege.ALL:
-            # Revoke all privileges before applying the necessary privileges
+
+        def get_stmts():
+            if self.privileges != DatabasePrivilege.ALL:
+                # Revoke all privileges before applying the necessary privileges
+                yield TextStatement(f"""
+                    REVOKE ALL ON DATABASE {self.database}
+                    FROM {self.grantee}
+                """)
             yield TextStatement(f"""
-                REVOKE ALL ON DATABASE {self.database}
-                FROM {self.grantee}
+                GRANT {', '.join(self.privileges)}
+                ON DATABASE {self.database}
+                TO {self.grantee}
             """)
-        yield TextStatement(f"""
-            GRANT {', '.join(self.privileges)}
-            ON DATABASE {self.database}
-            TO {self.grantee}
-        """)
+
+        yield TransactionOfStatements(*get_stmts())
 
     def stmts_to_drop(self):
         yield TextStatement(f"""
@@ -446,7 +576,7 @@ class SchemaPrivilege(Object):
         self.privileges = parse_privileges(privileges, obj_type=self.__class__)
         self.dependencies.add(Database(self.database))
         self.dependencies.add(Schema(database=self.database, name=self.schema))
-        self.dependencies.add(self.resolve_owner(self.grantee))
+        self.dependencies.add(self.resolve_role(self.grantee))
 
     @property
     def key(self):
@@ -456,17 +586,21 @@ class SchemaPrivilege(Object):
         )
 
     def stmts_to_create(self):
-        if self.privileges != self.ALL:
-            # Revoke all privileges before applying the necessary privileges
-            yield TextStatement(
-                query=f"REVOKE ALL ON SCHEMA {self.schema} FROM {self.grantee}",
-                database=self.database,
-            )
 
-        yield TextStatement(f"""
-            GRANT {', '.join(self.privileges)}
-            ON SCHEMA {self.schema} TO {self.grantee}
-        """, database=self.database)
+        def get_stmts():
+            if self.privileges != self.ALL:
+                # Revoke all privileges before applying the necessary privileges
+                yield TextStatement(
+                    query=f"REVOKE ALL ON SCHEMA {self.schema} FROM {self.grantee}",
+                    database=self.database,
+                )
+
+            yield TextStatement(f"""
+                GRANT {', '.join(self.privileges)}
+                ON SCHEMA {self.schema} TO {self.grantee}
+            """, database=self.database)
+
+        yield TransactionOfStatements(*get_stmts(), database=self.database)
 
     def stmts_to_drop(self):
         yield TextStatement(
@@ -475,7 +609,7 @@ class SchemaPrivilege(Object):
         )
 
 
-class SchemaTablesPrivilege(SchemaPrivilege):
+class SchemaTablesPrivilege(DefaultPrivilegeReady, SchemaPrivilege):
     """
     SchemaTablesPrivilege applies to ALL TABLES of a schema.
     We do not intend to support custom privileges on individual tables.
@@ -494,43 +628,27 @@ class SchemaTablesPrivilege(SchemaPrivilege):
     ALL = {SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER}
 
     def stmts_to_create(self):
-        if self.privileges != self.ALL:
+        def get_stmts():
+            if self.privileges != self.ALL:
+                yield TextStatement(
+                    query=f"""
+                        REVOKE ALL ON ALL TABLES
+                        IN SCHEMA {self.schema}
+                        FROM {self.grantee}
+                    """,
+                    database=self.database,
+                )
+
             yield TextStatement(
                 query=f"""
-                    REVOKE ALL ON ALL TABLES
+                    GRANT {', '.join(self.privileges)} ON ALL TABLES
                     IN SCHEMA {self.schema}
-                    FROM {self.grantee}
+                    TO {self.grantee}
                 """,
                 database=self.database,
             )
 
-        yield TextStatement(
-            query=f"""
-                GRANT {', '.join(self.privileges)} ON ALL TABLES
-                IN SCHEMA {self.schema}
-                TO {self.grantee}
-            """,
-            database=self.database,
-        )
-
-        # TODO Continue here.
-        # TODO The problem is as soon as you create default privileges
-        # TODO you need to drop them when you are dropping roles or
-        # TODO dropping roles will start to fail.
-
-        # # By default, any table created by the owner of the schema in this schema
-        # # should have the same access rights as the ones being granted.
-        # schema_owner = self.setup.get(Schema(database=self.database, name=self.schema)).owner
-        # yield TextStatement(
-        #     query=f"""
-        #         ALTER DEFAULT PRIVILEGES
-        #         FOR ROLE {schema_owner}
-        #         IN SCHEMA {self.schema}
-        #         GRANT {', '.join(self.privileges)} ON ALL TABLES
-        #         TO {self.grantee}
-        #     """,
-        #     database=self.database,
-        # )
+        yield TransactionOfStatements(*get_stmts(), database=self.database)
 
     def stmts_to_drop(self):
         yield TextStatement(
@@ -541,6 +659,17 @@ class SchemaTablesPrivilege(SchemaPrivilege):
             """,
             database=self.database,
         )
+
+    def get_default_privilege_clause(self, privileges=None, present=None) -> str:
+        present = self.present if (present is None) else present
+        privileges = self.privileges if (privileges is None) else privileges
+        return f"""
+            {'GRANT' if present else 'REVOKE'}
+            {', '.join(privileges)}
+            ON TABLES
+            {'TO' if present else 'FROM'}
+            {self.grantee}
+        """
 
 
 class State(str):
@@ -617,12 +746,6 @@ class ServerState:
         self.group_users = collections.defaultdict(list)
         self.user_groups = collections.defaultdict(list)
 
-    def pprint(self):
-        from pprint import pprint
-        for k, v in self.__dict__.items():
-            print(k, ":")
-            pprint(dict(v), indent=2)
-
     def get(self, obj: Object):
         getter = getattr(self, f"get_{obj.__class__.__name__.lower()}", None)
         if getter is None:
@@ -676,6 +799,25 @@ class ServerState:
                     else:
                         return State.IS_DIFFERENT
         return State.IS_ABSENT
+
+    def get_defaultprivilege(self, obj: DefaultPrivilege) -> State:
+        """
+        TODO This is an incomplete implementation of current state of default privileges --
+        TODO the actual state is not loaded, we just use the absence of schemas or roles
+        TODO as an indicator that the default privilege is surely absent.
+        TODO This is needed because the default state IS_UNKNOWN means that we should
+        TODO attempt to revoke the privileges every time they are requested absent
+        TODO but that would throw errors if schemas or roles don't exist.
+        """
+        priv = obj.privilege
+        if obj.grantor not in self.groups and obj.grantor not in self.users:
+            return State.IS_ABSENT
+        if isinstance(priv, SchemaTablesPrivilege):
+            if priv.database not in self.schemas:
+                return State.IS_ABSENT
+            if priv.schema not in self.schemas[priv.database]:
+                return State.IS_ABSENT
+        return State.IS_UNKNOWN
 
     def get_user(self, obj: User) -> State:
         return State.IS_PRESENT if obj.name in self.users else State.IS_ABSENT
@@ -764,19 +906,23 @@ class Setup:
         ]
 
     @property
-    def master_user(self) -> str:
+    def master_user(self) -> Optional[str]:
         """
         Master user becomes the owner of objects owned by to be dropped owners
         for which no new owner is set.
         """
-        return self._mc.username
+        if self._mc:
+            return self._mc.username
+        return None
 
     @property
-    def master_database(self) -> str:
+    def master_database(self) -> Optional[str]:
         """
         Master database (postgres) is not managed, but some revokes should be issued in that.
         """
-        return self._mc.database
+        if self._mc:
+            return self._mc.database
+        return None
 
     @property
     def managed_databases(self) -> List[str]:
@@ -854,18 +1000,23 @@ class Setup:
         self.register(stp)
         return stp
 
-    def resolve_owner(self, owner: str):
-        group = Group(owner)
-        user = User(owner)
+    def default_privilege(self, **kwargs) -> DefaultPrivilege:
+        def_priv = DefaultPrivilege(**kwargs)
+        self.register(def_priv)
+        return def_priv
+
+    def resolve_role(self, rolname: str, present: bool = True):
+        group = Group(rolname, present=present)
+        user = User(rolname, present=present)
         if group in self:
             return group
         elif user in self:
             return user
-        if owner.lower() == "public":
+        if rolname.lower() == "public":
             return Group("public")
         raise ValueError(
-            f"Ambiguous owner {owner!r} - "
-            f"declare it as Group or User before referencing it as owner of another object"
+            f"Ambiguous role {rolname!r} - "
+            f"declare it as Group or User before referencing it in another object"
         )
 
     def generate_graph(self) -> Graph:
@@ -892,6 +1043,9 @@ class Setup:
                 continue
             state.groups[raw["name"]] = raw
 
+        # Always register the public group
+        state.groups["public"] = {"name": "public"}
+
         for raw in self._mc.execute("SELECT rolname AS name FROM pg_roles").get_all("name"):
             if raw["name"].startswith("pg_") or raw["name"] in state.groups:
                 # pg_roles contains both users and groups so the only way to distinguish
@@ -905,6 +1059,7 @@ class Setup:
             pg_roles.rolname
             FROM pg_group
             LEFT JOIN pg_roles ON pg_roles.oid = ANY(pg_group.grolist)
+            WHERE pg_group.groname NOT LIKE 'pg_%%'
             ORDER BY pg_group.groname, pg_roles.rolname
         """).get_all("groname", "rolname")
         for raw in raw_rows:
@@ -916,6 +1071,8 @@ class Setup:
             SELECT d.datname as name,
             pg_catalog.pg_get_userbyid(d.datdba) as owner
             FROM pg_catalog.pg_database d
+            WHERE d.datname NOT LIKE 'template%%'
+            AND d.datname != 'postgres'
         """).get_all("name", "owner")
         for raw in raw_rows:
             state.databases[raw["name"]] = raw
@@ -941,6 +1098,10 @@ class Setup:
                     "database": datname, "name": raw["name"], "owner": raw["owner"],
                 }
 
+        #
+        # Load database privileges
+        #
+
         for priv_type in DatabasePrivilege.ALL:
             raw_rows = self._mc.execute(f"""
                 SELECT
@@ -952,7 +1113,7 @@ class Setup:
                         AND NOT d.datname LIKE 'template%%' AND d.datname != 'postgres'
                     ) AS databases
                 FROM pg_roles r
-                WHERE NOT r.rolcanlogin AND NOT (r.rolname LIKE 'pg_%%')
+                WHERE NOT (r.rolname LIKE 'pg_%%')
                 ORDER BY r.rolname
             """, priv_type).get_all("rolname", "databases")
             for raw in raw_rows:
@@ -1029,12 +1190,8 @@ class Setup:
         """
         return self._server_state.get(obj)
 
-    def generate_stmts(self) -> Generator[Statement, None, None]:
+    def _generate_stmts(self) -> Generator[Statement, None, None]:
         objects = self.topological_order()
-
-        log.debug("Graph in topological order to CREATE objects:")
-        for i, obj in enumerate(objects):
-            log.debug(f"  {str(i+1).zfill(2)} {obj} present={obj.present}")
 
         # CREATE objects in topological order
         for obj in objects:
@@ -1055,10 +1212,6 @@ class Setup:
             if obj.present:
                 yield from obj.stmts_to_maintain()
 
-        log.debug("Graph in reverse topological order to DROP objects:")
-        for i, obj in enumerate(reversed(objects)):
-            log.debug(f"  {str(i + 1).zfill(2)} {obj} present={obj.present}")
-
         # DROP objects in reverse topological order
         for obj in reversed(objects):
             current_state = self.get_current_state(obj)
@@ -1070,10 +1223,58 @@ class Setup:
             elif current_state.is_unknown and not obj.present:
                 yield from obj.stmts_to_drop()
 
-    def execute(self):
+    def inspect(self, load_current_state=True):
+        """
+        Inspect objects of the graph.
+        """
+        if load_current_state:
+            self._load_server_state()
+        objects = self.topological_order()
+
+        for i, obj in enumerate(objects):
+            if load_current_state:
+                current_state = self.get_current_state(obj)
+            else:
+                current_state = ""
+            print(
+                f"{str(i + 1).zfill(2)} {'PRESENT' if obj.present else '       '} "
+                f"{current_state:10} "
+                f"{obj.key}"
+            )
+
+    def execute(self, dry_run: bool = False):
+        """
+        Ensure the object graph in the setup matches that in the database cluster.
+
+        If dry_run is set to True, it CONNECTS to the server and consults the current state,
+        but no changes are applied.
+        """
+
+        def execute_stmt(connection: Connection, statement: Statement):
+            if dry_run:
+                if isinstance(statement, TransactionOfStatements):
+                    for s in statement.statements:
+                        connection.log_query(s.query, dry_run=True, database=s.database)
+                else:
+                    connection.log_query(statement.query, dry_run=True, database=statement.database)
+                return
+
+            # Before attempting to drop a database, must close the connection to that database.
+            if isinstance(statement, DropStatement) and isinstance(statement.obj, Database):
+                self.get_connection(statement.obj.name).close()
+
+            # If a statement is a transaction, must execute it as one
+            if isinstance(statement, TransactionOfStatements):
+                with connection.begin() as tx:
+                    for stmt in statement.statements:
+                        assert stmt.database == connection.database
+                        tx.execute(stmt.query, *stmt.params)
+            else:
+                connection.execute(statement.query, *statement.params)
+
         self._load_server_state()
 
-        for stmt in self.generate_stmts():
+        for stmt in self._generate_stmts():
             if stmt.is_on_all_databases:
                 for datname in self.managed_databases:
                     # Not all statements can always be executed on all databases because they may not exist.
@@ -1083,7 +1284,7 @@ class Setup:
                     # Therefore "present" is the best indicator of whether we should attempt this.
                     database = self.get(Database(datname))
                     if database and database.present:
-                        self.get_connection(database=datname).execute(stmt.query, *stmt.params)
+                        execute_stmt(connection=self.get_connection(database=datname), statement=stmt)
                     else:
                         log.info(f"Skipping statement {stmt} on non-existent database {datname!r}")
             else:
@@ -1094,4 +1295,4 @@ class Setup:
                 if isinstance(stmt, DropStatement) and isinstance(stmt.obj, Database):
                     self.get_connection(stmt.obj.name).close()
 
-                conn.execute(stmt.query, *stmt.params)
+                execute_stmt(connection=conn, statement=stmt)

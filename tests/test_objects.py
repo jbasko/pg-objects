@@ -16,7 +16,7 @@ def test_simple_setup():
     # Fake state
     setup._server_state = ServerState()
 
-    for stmt in setup.generate_stmts():
+    for stmt in setup._generate_stmts():
         print(stmt)
 
 

@@ -72,8 +72,27 @@ created database you have to revoke public group's access to the database.
   is *managed* if the object graph contains an explicit declaration of the object.
 * `ALL TABLES` privileges only
 
+##### `NOINHERIT`
+
+Unless specified otherwise, all users are created with `NOINHERIT` which means that they
+do not automatically inherit the privileges of groups they belong to. This means that
+users are forced to call `SET ROLE groupname` before using privileges associated
+with a group. This makes managing default privileges and table ownership easier
+as tables aren't created by individual users.
+
+However, it seems that if user has `NOINHERIT`, it is impossible for them to connect
+to a database access to which is provided through group membership. **This DOES NOT work**:
+
+```text
+postgres=> SET ROLE devops;
+postgres=> \c devopsdb
+FATAL:  permission denied for database "devopsdb"
+DETAIL:  User does not have CONNECT privilege.
+```
+
+This forces us to declare `CONNECT` privilege on individual users.
+
 ### TODO
 
 * Explore allowing references to `PUBLIC` group in the object graph. That would require
   conditional logic in group create/drop methods to ignore any operations on the `PUBLIC` group.
-

@@ -16,17 +16,21 @@ class Connection:
 
     _password_regex = re.compile(r"(password\s+['\"])([^'\"]+)(['\"])", re.IGNORECASE)
 
-    def format_query(self, query: str):
+    def format_query(self, query: str, dry_run: bool = False, database: str = None):
+        """
+        Format query for LOGGING, not for execution.
+        """
         formatted = " ".join(line.strip() for line in textwrap.dedent(query).splitlines()).strip()
         formatted = self._password_regex.sub(r'\g<1>***\g<3>', formatted)
-        return f"{self.database:>15}: {formatted}"
+        database = database or self.database
+        return f"{'[DRY-RUN]' if dry_run else ''}{database:>15}: {formatted}"
 
-    def log_query(self, query: str):
+    def log_query(self, query: str, dry_run: bool = False, database: str = None):
         check_query = query.strip()[:30].lower()
         if any(keyword in check_query for keyword in self.KEY_QUERIES):
-            log.warning(self.format_query(query))
+            log.warning(self.format_query(query, dry_run=dry_run, database=database))
         else:
-            log.debug(self.format_query(query))
+            log.debug(self.format_query(query, dry_run=dry_run, database=database))
 
     def __init__(self, host=None, username=None, password=None, database=None, port=5432, autocommit=True):
         self._connection = None

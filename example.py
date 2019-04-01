@@ -14,25 +14,27 @@ setup = Setup(master_connection=Connection(
     database=os.environ.get("PGO_DATABASE", "postgres")),
 )
 
-setup.group(name="devops", present=True)
-setup.group(name="datascience", present=True)
 
-setup.user(name="johnny", password="johnny", groups=["datascience"], present=True)
-setup.user(name="peter", password="peter", groups=["devops"], present=True)
+devops = setup.group(name="devops", present=True)
+datascience = setup.group(name="datascience", present=False)
 
-setup.database("datascience", owner="devops", present=True)
-setup.database("existingdb", present=True)
+datascience_db = setup.database("datascience", owner=devops.name, present=True)
+existingdb = setup.database("existingdb", present=True)
+
+setup.user(name="johnny", password="johnny", groups=["datascience"], databases=["existingdb"], present=False)
+setup.user(name="peter", password="peter", groups=["devops"], databases=["existingdb"], present=True)
+
 setup.schema(database="existingdb", name="existingschema", owner="devops", present=True)
 setup.schema(database="datascience", name="private", owner="devops", present=True)
 
-setup.database_privilege(database="existingdb", grantee="datascience", privileges=["CONNECT", "TEMP"], present=True)
+setup.database_privilege(database="existingdb", grantee="datascience", privileges=["CONNECT", "TEMP"], present=False)
 setup.database_privilege(database="existingdb", grantee="devops", privileges="ALL", present=True)
 
-setup.schema_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=True)
+setup.schema_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=False)
 
-# At first let's support ALL TABLES privilege only.
-setup.schema_tables_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=True)
+setup.schema_tables_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=False)
+y = setup.schema_tables_privilege(database="existingdb", schema="existingschema", grantee="devops", privileges="ALL", present=True)
+setup.default_privilege(privilege=y, grantor="datascience", present=False)
 
-setup.execute()
-
-# setup._server_state.pprint()
+setup.execute(dry_run=True)
+# setup.inspect()
