@@ -475,6 +475,54 @@ class SchemaPrivilege(Object):
         )
 
 
+class SchemaTablesPrivilege(SchemaPrivilege):
+    """
+    Currently we support ALL TABLES privilege only - you cannot specify an individual table.
+
+    Schema "public" is accessible to anyone who has access to the database and we don't manage
+    it yet.
+    """
+
+    SELECT = "SELECT"
+    INSERT = "INSERT"
+    UPDATE = "UPDATE"
+    DELETE = "DELETE"
+    TRUNCATE = "TRUNCATE"
+    REFERENCES = "REFERENCES"
+    TRIGGER = "TRIGGER"
+    ALL = {SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER}
+
+    def stmts_to_create(self):
+        if self.privileges != self.ALL:
+            yield TextStatement(
+                query=f"""
+                    REVOKE ALL ON ALL TABLES
+                    IN SCHEMA {self.schema}
+                    FROM {self.grantee}
+                """,
+                database=self.database,
+            )
+
+        yield TextStatement(
+            query=f"""
+                GRANT {', '.join(self.privileges)} ON ALL TABLES
+                IN SCHEMA {self.schema}
+                TO {self.grantee}
+            """,
+            database=self.database,
+        )
+
+    def stmts_to_drop(self):
+        yield TextStatement(
+            query=f"""
+                REVOKE {', '.join(self.privileges)} ON ALL TABLES
+                IN SCHEMA {self.schema}
+                FROM {self.grantee}
+            """,
+            database=self.database,
+        )
+
+
 class State(str):
     # The object currently exists
     IS_PRESENT: "State"
@@ -518,12 +566,17 @@ class ServerState:
         self.database_privileges = collections.defaultdict(
             lambda: collections.defaultdict(set)
         )
+        self.schemas = collections.defaultdict(dict)
         self.schema_privileges = collections.defaultdict(
             lambda: collections.defaultdict(
                 lambda: collections.defaultdict(set)
             )
         )
-        self.schemas = collections.defaultdict(dict)
+        self.schema_tables_privileges = collections.defaultdict(
+            lambda: collections.defaultdict(
+                lambda: collections.defaultdict(set)
+            )
+        )
         self.groups = {}
         self.users = {}
         self.group_users = collections.defaultdict(list)
@@ -560,10 +613,22 @@ class ServerState:
         return State.IS_ABSENT
 
     def get_schemaprivilege(self, obj: SchemaPrivilege) -> State:
-        if obj.database in self.schema_privileges:
-            if obj.schema in self.schema_privileges[obj.database]:
-                if obj.grantee in self.schema_privileges[obj.database][obj.schema]:
-                    if obj.privileges == self.schema_privileges[obj.database][obj.schema][obj.grantee]:
+        sp = self.schema_privileges
+        if obj.database in sp:
+            if obj.schema in sp[obj.database]:
+                if obj.grantee in sp[obj.database][obj.schema]:
+                    if obj.privileges == sp[obj.database][obj.schema][obj.grantee]:
+                        return State.IS_PRESENT
+                    else:
+                        return State.IS_DIFFERENT
+        return State.IS_ABSENT
+
+    def get_schematablesprivilege(self, obj: SchemaTablesPrivilege) -> State:
+        stp = self.schema_tables_privileges
+        if obj.database in stp:
+            if obj.schema in stp[obj.database]:
+                if obj.grantee in stp[obj.database][obj.schema]:
+                    if obj.privileges == stp[obj.database][obj.schema][obj.grantee]:
                         return State.IS_PRESENT
                     else:
                         return State.IS_DIFFERENT
@@ -741,6 +806,11 @@ class Setup:
         self.register(sp)
         return sp
 
+    def schema_tables_privilege(self, **kwargs) -> SchemaTablesPrivilege:
+        stp = SchemaTablesPrivilege(**kwargs, setup=self)
+        self.register(stp)
+        return stp
+
     def resolve_owner(self, owner: str):
         group = Group(owner)
         user = User(owner)
@@ -772,19 +842,19 @@ class Setup:
         return self._connections[database]
 
     def _load_server_state(self):
-        self._server_state = ServerState()
+        state = ServerState()
 
         for raw in self._mc.execute("SELECT groname AS name FROM pg_group").get_all("name"):
             if raw["name"].startswith("pg_"):
                 continue
-            self._server_state.groups[raw["name"]] = raw
+            state.groups[raw["name"]] = raw
 
         for raw in self._mc.execute("SELECT rolname AS name FROM pg_roles").get_all("name"):
-            if raw["name"].startswith("pg_") or raw["name"] in self._server_state.groups:
+            if raw["name"].startswith("pg_") or raw["name"] in state.groups:
                 # pg_roles contains both users and groups so the only way to distinguish
                 # them is by checking which ones are not groups.
                 continue
-            self._server_state.users[raw["name"]] = raw
+            state.users[raw["name"]] = raw
 
         raw_rows = self._mc.execute(f"""
             SELECT
@@ -796,8 +866,8 @@ class Setup:
         """).get_all("groname", "rolname")
         for raw in raw_rows:
             if raw["rolname"]:
-                self._server_state.group_users[raw["groname"]].append(raw["rolname"])
-                self._server_state.user_groups[raw["rolname"]].append(raw["groname"])
+                state.group_users[raw["groname"]].append(raw["rolname"])
+                state.user_groups[raw["rolname"]].append(raw["groname"])
 
         raw_rows = self._mc.execute(f"""
             SELECT d.datname as name,
@@ -805,9 +875,9 @@ class Setup:
             FROM pg_catalog.pg_database d
         """).get_all("name", "owner")
         for raw in raw_rows:
-            self._server_state.databases[raw["name"]] = raw
+            state.databases[raw["name"]] = raw
 
-        for datname in self._server_state.databases.keys():
+        for datname in state.databases.keys():
             if datname not in self.managed_databases:
                 # Do not attempt to connect to or in any other way manage
                 # databases which are not mentioned in the objects.
@@ -824,7 +894,7 @@ class Setup:
                 ORDER BY pg_namespace.nspname
             """).get_all("name", "owner")
             for raw in raw_rows:
-                self._server_state.schemas[datname][raw["name"]] = {
+                state.schemas[datname][raw["name"]] = {
                     "database": datname, "name": raw["name"], "owner": raw["owner"],
                 }
 
@@ -846,9 +916,9 @@ class Setup:
                 if not raw["databases"]:
                     continue
                 for datname in raw["databases"].split(","):
-                    self._server_state.database_privileges[datname][raw["rolname"]].add(priv_type)
+                    state.database_privileges[datname][raw["rolname"]].add(priv_type)
 
-        for datname in self._server_state.databases.keys():
+        for datname in state.databases.keys():
             if datname not in self.managed_databases:
                 continue
             conn = self.get_connection(datname)
@@ -871,7 +941,28 @@ class Setup:
                     if not raw["schemas"]:
                         continue
                     for schemaname in raw["schemas"].split(","):
-                        self._server_state.schema_privileges[datname][schemaname][raw["rolname"]].add(priv_type)
+                        state.schema_privileges[datname][schemaname][raw["rolname"]].add(priv_type)
+
+        for datname in state.databases.keys():
+            if datname not in self.managed_databases:
+                continue
+            conn = self.get_connection(datname)
+            raw_rows = conn.execute(f"""
+                SELECT
+                grantee, table_schema, table_name, STRING_AGG(privilege_type, ',') AS privileges
+                FROM information_schema.role_table_grants
+                WHERE table_schema != 'information_schema' AND NOT table_schema LIKE 'pg_%'
+                GROUP BY grantee, table_schema, table_name;
+            """).get_all("grantee", "table_schema", "table_name", "privileges")
+            for raw in raw_rows:
+                if not raw["privileges"]:
+                    continue
+                state.schema_tables_privileges[datname][raw["table_schema"]][raw["grantee"]].update(
+                    raw["privileges"].split(",")
+                )
+
+        # TODO Return instead of storing on instance so that it could be reloaded
+        self._server_state = state
 
     def get_current_state(self, obj: Object) -> State:
         """

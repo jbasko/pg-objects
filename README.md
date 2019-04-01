@@ -67,7 +67,7 @@ created database you have to revoke public group's access to the database.
 * No user-specific privileges -- all privileges are group-specific
 * All referenced groups, users, databases, and schemas should be *managed* -- an object
   is *managed* if the object graph contains an explicit declaration of the object.
-
+* `ALL TABLES` privileges only
 
 ### TODO
 
