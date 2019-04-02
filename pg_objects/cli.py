@@ -28,10 +28,10 @@ def pg_objects_cli(parser, subcommand):
     def get_connection(args) -> Connection:
         prefix = args.env_prefix
         return Connection(
-            host=os.environ.get(f"{prefix}HOST", "localhost"),
+            host=os.environ.get(f"{prefix}HOST", ""),
             port=os.environ.get(f"{prefix}PORT", "5432"),
             database=os.environ.get(f"{prefix}DATABASE", "postgres"),
-            username=os.environ.get(f"{prefix}USER", ""),
+            username=os.environ.get(f"{prefix}USER", "postgres"),
             password=os.environ.get(f"{prefix}PASSWORD", ""),
         )
 
