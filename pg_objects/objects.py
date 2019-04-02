@@ -229,26 +229,17 @@ class User(Role):
     password: str
     inherit: bool
 
-    # Each user with inherit=False (which is the default setting and should not be changed unless
-    # you are fully aware of the default privilege implications) requires an explicit list of
-    # databases they are allowed to connect to because group's CONNECT privilege cannot or isn't passed to user.
-    # Alternatively, you can explicitly declare the DatabasePrivilege for user in the setup.
-    databases: Set[str]
-
     def __init__(
         self,
-        name, password: str = None, groups: List[str] = None, inherit: bool = False, databases: Set[str] = None,
+        name, password: str = None, groups: List[str] = None, inherit: bool = False,
         present: bool = True, setup: "Setup" = None,
     ):
         super().__init__(name=name, present=present, setup=setup)
         self.password = password
         self.groups = groups or []
         self.inherit = inherit
-        self.databases = set(databases) if databases else set()
         for group in self.groups:
             self.dependencies.add(Group(group))
-        for datname in self.databases:
-            self.dependencies.add(Database(datname))
 
     def add_to_graph(self, graph: Graph):
         super().add_to_graph(graph)
@@ -256,18 +247,6 @@ class User(Role):
             GroupUser(
                 group=group, user=self.name,
                 present=self.present, setup=self.setup,
-            ).add_to_graph(graph)
-
-        # Through "databases" attribute user only gets CONNECT privilege.
-        # Other privileges (CREATE, TEMPORARY) need to be assigned via group role
-        # which user should then use to create objects (SET ROLE groupname).
-        for datname in self.databases:
-            DatabasePrivilege(
-                database=datname,
-                grantee=self.name,
-                privileges=DatabasePrivilege.CONNECT,
-                present=self.present,
-                setup=self.setup,
             ).add_to_graph(graph)
 
     def stmts_to_maintain(self) -> Generator[Statement, None, None]:

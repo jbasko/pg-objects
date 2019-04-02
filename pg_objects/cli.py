@@ -3,7 +3,7 @@ import logging
 
 from aarghparse import cli
 
-from pg_objects.utils import generate_password, get_password_md5
+from .utils import generate_password, get_password_md5
 from .connection import get_connection
 from .objects import Setup
 

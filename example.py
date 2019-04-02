@@ -14,8 +14,8 @@ datascience = setup.group(name="datascience", present=False)
 datascience_db = setup.database("datascience", owner=devops.name, present=True)
 existingdb = setup.database("existingdb", present=True)
 
-setup.user(name="johnny", password="johnny", groups=["datascience"], databases=["existingdb"], present=False)
-setup.user(name="peter", password="peter", groups=["devops"], databases=["existingdb"], present=True)
+setup.user(name="johnny", password="johnny", groups=["datascience"], present=False)
+setup.user(name="peter", password="peter", groups=["devops"], present=True)
 
 setup.schema(database="existingdb", name="existingschema", owner="devops", present=True)
 setup.schema(database="datascience", name="private", owner="devops", present=True)
