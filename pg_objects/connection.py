@@ -66,9 +66,10 @@ class Connection:
 
     @property
     def connection(self):
+        host_str = f"host={self.host}" if self.host else ""
         dsn = (
             f"dbname={self.database} "
-            f"host={self.host} "
+            f"{host_str} "
             f"port={self._connection_params['port']} "
             f"user={self.username} "
             f"password={self._connection_params['password']}"
