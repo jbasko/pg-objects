@@ -3,9 +3,8 @@ from typing import Dict, Set, Union, Collection
 
 from ..statements import CreateStatement, DropStatement, TextStatement, TransactionOfStatements
 from ..acl_utils import parse_datacl
-from ..connection import Connection
 from ..graph import Graph
-from .base import Object, ObjectLink, parse_privileges, SetupAbc, ObjectState
+from .base import Object, ObjectLink, parse_privileges, SetupAbc, ObjectState, StateProviderAbc
 
 
 class Database(Object):
@@ -69,55 +68,6 @@ class DatabaseOwner(ObjectLink):
         yield TextStatement(f"ALTER DATABASE {self.database} OWNER TO {self.owner}")
 
 
-class DatabasePrivilegeStateProvider:
-
-    _dpp_db_privs: Dict
-    _dpp_db_privs_lookup = {
-        "c": "CONNECT",
-        "C": "CREATE",
-        "T": "TEMPORARY",
-    }
-
-    @property
-    def database_privileges(self):
-        """
-        [datname][grantee] => Set[privilege]
-        """
-        return self._dpp_db_privs
-
-    def _has_database_privileges(self, database, grantee) -> bool:
-        if database in self._dpp_db_privs:
-            if grantee in self._dpp_db_privs[database]:
-                return True
-        return False
-
-    def _get_database_privileges(self, database, grantee) -> Set[str]:
-        if database in self._dpp_db_privs:
-            if grantee in self._dpp_db_privs[database]:
-                return self._dpp_db_privs[database][grantee]
-        return set()
-
-    def get_databaseprivilege(self, obj: "DatabasePrivilege") -> ObjectState:
-        privileges = self._get_database_privileges(database=obj.database, grantee=obj.grantee)
-        if not privileges:
-            return ObjectState.IS_ABSENT
-        return ObjectState.IS_PRESENT if obj.privileges == privileges else ObjectState.IS_DIFFERENT
-
-    def load_database_privileges(self, mc: Connection):
-        self._dpp_db_privs = collections.defaultdict(
-            lambda: collections.defaultdict(set)
-        )
-
-        for row in mc.execute(f"""
-            SELECT datname, datacl FROM pg_database
-            WHERE datname NOT LIKE 'template%%'
-        """).get_all("datname", "datacl"):
-            for (grantee, privs, grantor) in parse_datacl(row["datacl"]):
-                self._dpp_db_privs[row["datname"]][grantee].update(
-                    self._dpp_db_privs_lookup[p] for p in privs
-                )
-
-
 class DatabasePrivilege(Object):
     database: str
     grantee: str
@@ -167,3 +117,54 @@ class DatabasePrivilege(Object):
             ON DATABASE {self.database}
             FROM {self.grantee}
         """)
+
+
+class DatabasePrivilegeStateProvider(StateProviderAbc):
+
+    _dpp_db_privs: Dict = None
+    _dpp_db_privs_lookup = {
+        "c": "CONNECT",
+        "C": "CREATE",
+        "T": "TEMPORARY",
+    }
+
+    @property
+    def database_privileges(self):
+        """
+        [datname][grantee] => Set[privilege]
+        """
+        if self._dpp_db_privs is None:
+            self.load_database_privileges()
+        return self._dpp_db_privs
+
+    def _has_database_privileges(self, database, grantee) -> bool:
+        if database in self._dpp_db_privs:
+            if grantee in self._dpp_db_privs[database]:
+                return True
+        return False
+
+    def _get_database_privileges(self, database, grantee) -> Set[str]:
+        if database in self._dpp_db_privs:
+            if grantee in self._dpp_db_privs[database]:
+                return self._dpp_db_privs[database][grantee]
+        return set()
+
+    def get_databaseprivilege(self, obj: DatabasePrivilege) -> ObjectState:
+        privileges = self._get_database_privileges(database=obj.database, grantee=obj.grantee)
+        if not privileges:
+            return ObjectState.IS_ABSENT
+        return ObjectState.IS_PRESENT if obj.privileges == privileges else ObjectState.IS_DIFFERENT
+
+    def load_database_privileges(self):
+        self._dpp_db_privs = collections.defaultdict(
+            lambda: collections.defaultdict(set)
+        )
+
+        for row in self.master_connection.execute(f"""
+            SELECT datname, datacl FROM pg_database
+            WHERE datname NOT LIKE 'template%%'
+        """).get_all("datname", "datacl"):
+            for (grantee, privs, grantor) in parse_datacl(row["datacl"]):
+                self._dpp_db_privs[row["datname"]][grantee].update(
+                    self._dpp_db_privs_lookup[p] for p in privs
+                )

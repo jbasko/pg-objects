@@ -1,22 +1,26 @@
+from .objects.base import ConnectionManager
 from .objects.database import DatabasePrivilegeStateProvider
-from .connection import get_connection, Connection
+from .objects.schema import SchemaTablesStateProvider
+from .connection import Connection, get_connection
 
 
 class State(
-    DatabasePrivilegeStateProvider
+    DatabasePrivilegeStateProvider,
+    SchemaTablesStateProvider,
 ):
-    def __init__(self, master_connection: Connection = None):
-        if master_connection is None:
-            master_connection = get_connection()
-        self.master_connection: Connection = master_connection
+    def __init__(self, connection_manager: ConnectionManager = None, master_connection: Connection = None):
+        if connection_manager:
+            self.connection_manager = connection_manager
+        else:
+            self.connection_manager = ConnectionManager(master_connection=master_connection)
 
     def load_all(self):
         for k in dir(self):
             if not k.startswith("load_") or k == "load_all":
                 continue
-            getattr(self, k)(mc=self.master_connection)
+            getattr(self, k)()
 
 
 if __name__ == "__main__":
-    state = State()
+    state = State(master_connection=get_connection())
     state.load_all()

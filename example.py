@@ -22,7 +22,7 @@ setup.schema(database="existingdb", name="existingschema", owner="devops", prese
 setup.schema(database="datascience", name="private", owner="devops", present=True)
 
 setup.database_privilege(database="existingdb", grantee="datascience", privileges=["CONNECT", "TEMP"], present=False)
-setup.database_privilege(database="existingdb", grantee="devops", privileges="ALL", present=False)
+setup.database_privilege(database="existingdb", grantee="devops", privileges="ALL", present=True)
 
 setup.schema_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=False)
 

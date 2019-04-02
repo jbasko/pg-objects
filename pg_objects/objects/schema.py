@@ -1,8 +1,9 @@
-from typing import Set, Union, Collection
+import collections
+from typing import Set, Union, Collection, Dict
 
 from ..graph import Graph
 from ..statements import CreateStatement, DropStatement, TextStatement, TransactionOfStatements
-from .base import Object, SetupAbc, ObjectLink, parse_privileges
+from .base import Object, SetupAbc, ObjectLink, parse_privileges, StateProviderAbc
 from .database import Database
 from .default_privilege import DefaultPrivilegeReady
 
@@ -175,3 +176,44 @@ class SchemaTablesPrivilege(DefaultPrivilegeReady, SchemaPrivilege):
             {'TO' if present else 'FROM'}
             {self.grantee}
         """
+
+
+class SchemaTablesStateProvider(StateProviderAbc):
+
+    # Provided by DatabaseStateProvider
+    databases: Dict
+
+    _stsp_schema_tables: Dict = None
+
+    @property
+    def schema_tables(self):
+        """
+        [database][schema][table] => {}
+        """
+        if self._stsp_schema_tables is None:
+            self.load_schema_tables()
+        return self._stsp_schema_tables
+
+    def load_schema_tables(self):
+        #
+        # Load schema tables
+        #
+
+        self._stsp_schema_tables = collections.defaultdict(
+            lambda: collections.defaultdict(dict)
+        )
+
+        for datname in self.databases:
+            conn = self.get_connection(datname)
+            raw_rows = conn.execute(f"""
+                SELECT schemaname, tablename, tableowner FROM pg_tables
+                WHERE schemaname != 'information_schema' AND NOT schemaname LIKE 'pg_%%' 
+            """).get_all("schemaname", "tablename", "tableowner")
+            for raw in raw_rows:
+                print(raw)
+                self._stsp_schema_tables[datname][raw["schemaname"]][raw["tablename"]] = {
+                    "database": datname,
+                    "schema": raw["schemaname"],
+                    "name": raw["tablename"],
+                    "owner": raw["tableowner"],
+                }

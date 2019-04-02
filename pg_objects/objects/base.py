@@ -1,5 +1,5 @@
 import abc
-from typing import Set, Generator, Optional, Union, Collection, Type, Hashable
+from typing import Set, Generator, Optional, Union, Collection, Type, Hashable, Dict
 
 from ..graph import Graph
 from ..statements import Statement
@@ -7,8 +7,10 @@ from ..connection import Connection
 
 
 class SetupAbc(abc.ABC):
+    master_connection: Connection
     master_user: str
     master_database: str
+    connection_manager: "ConnectionManager"
 
     @abc.abstractmethod
     def register(self, obj: "Object"):
@@ -32,6 +34,30 @@ class SetupAbc(abc.ABC):
 
     def get_current_state(self, obj: "Object") -> "ObjectState":
         raise NotImplementedError()
+
+
+class ConnectionManager:
+    def __init__(self, master_connection: Connection):
+        self.master_connection = master_connection
+        self._managed_connections: Dict[str, Connection] = {}
+
+    def get_connection(self, database: str) -> Connection:
+        if database is None or database == self.master_connection.database:
+            return self.master_connection
+        if database not in self._managed_connections:
+            self._managed_connections[database] = self.master_connection.clone(database=database)
+        return self._managed_connections[database]
+
+
+class StateProviderAbc(abc.ABC):
+    connection_manager: ConnectionManager
+
+    @property
+    def master_connection(self) -> Connection:
+        return self.connection_manager.master_connection
+
+    def get_connection(self, database: str) -> Connection:
+        return self.connection_manager.get_connection(database=database)
 
 
 class ObjectState(str):

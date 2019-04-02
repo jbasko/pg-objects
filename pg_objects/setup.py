@@ -4,7 +4,7 @@ from typing import Dict, Hashable, List, Optional, Union, Generator
 
 from .connection import Connection
 from .graph import Graph
-from .objects.base import Object, ObjectState, SetupAbc, ObjectLink
+from .objects.base import Object, ObjectState, SetupAbc, ObjectLink, ConnectionManager
 from .objects.database import Database, DatabaseOwner, DatabasePrivilege
 from .objects.default_privilege import DefaultPrivilege
 from .objects.role import User, Group, GroupUser
@@ -17,8 +17,8 @@ log = logging.getLogger(__name__)
 
 
 class ServerState(State):
-    def __init__(self, master_connection: Connection = None):
-        super().__init__(master_connection=master_connection)
+    def __init__(self, connection_manager: ConnectionManager):
+        super().__init__(connection_manager=connection_manager)
 
         self.databases = {}
 
@@ -30,11 +30,6 @@ class ServerState(State):
             lambda: collections.defaultdict(
                 lambda: collections.defaultdict(set)
             )
-        )
-
-        # [database][schema][table] => {}
-        self.schema_tables = collections.defaultdict(
-            lambda: collections.defaultdict(dict)
         )
 
         # [database][schema][grantee][table] => Set[privileges]
@@ -149,14 +144,17 @@ class Setup(SetupAbc):
 
         self._server_state: ServerState = None
 
-        # Master connection
-        self._mc: Connection = master_connection
-
-        # Connections by database except the master connection which is self._mc
-        self._connections: Dict[str, Connection] = {}
+        self.connection_manager = ConnectionManager(master_connection=master_connection)
 
         for obj in self.get_implicit_objects():
             self.register(obj)
+
+    @property
+    def _mc(self) -> Connection:
+        return self.connection_manager.master_connection
+
+    def get_connection(self, database: str = None) -> Connection:
+        return self.connection_manager.get_connection(database=database)
 
     @classmethod
     def from_definition(cls, definition: Dict, master_connection: Connection = None) -> "Setup":
@@ -309,15 +307,8 @@ class Setup(SetupAbc):
     def topological_order(self) -> List[Object]:
         return [vertex.value for vertex in self.generate_graph().topological_sort_by_kahn()]
 
-    def get_connection(self, database: str = None) -> Connection:
-        if database is None or database == self._mc.database:
-            return self._mc
-        if database not in self._connections:
-            self._connections[database] = self._mc.clone(database=database)
-        return self._connections[database]
-
     def _load_server_state(self):
-        state = ServerState(master_connection=self._mc)
+        state = ServerState(connection_manager=self.connection_manager)
         state.load_all()
 
         for raw in self._mc.execute("SELECT groname AS name FROM pg_group").get_all("name"):
@@ -408,21 +399,6 @@ class Setup(SetupAbc):
                         continue
                     for schemaname in raw["schemas"].split(","):
                         state.schema_privileges[datname][schemaname][raw["rolname"]].add(priv_type)
-
-            #
-            # Load schema tables
-            #
-            raw_rows = conn.execute(f"""
-                SELECT schemaname, tablename, tableowner FROM pg_tables
-                WHERE schemaname != 'information_schema' AND NOT schemaname LIKE 'pg_%%' 
-            """).get_all("schemaname", "tablename", "tableowner")
-            for raw in raw_rows:
-                state.schema_tables[datname][raw["schemaname"]][raw["tablename"]] = {
-                    "database": datname,
-                    "schema": raw["schemaname"],
-                    "name": raw["tablename"],
-                    "owner": raw["tableowner"],
-                }
 
             #
             # Load schema tables privileges
