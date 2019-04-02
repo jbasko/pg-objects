@@ -892,6 +892,20 @@ class Setup:
         for obj in self.get_implicit_objects():
             self.register(obj)
 
+    @classmethod
+    def from_definition(cls, definition: Dict, master_connection: Connection = None) -> "Setup":
+        setup = cls(master_connection=master_connection)
+        types = {}
+        for k, v in globals().items():
+            if isinstance(v, type) and issubclass(v, Object):
+                types[k] = v
+        for raw in definition["objects"]:
+            obj_type_name = raw.pop("type")
+            obj_type = types[obj_type_name]
+            obj = obj_type(**raw, setup=setup)
+            setup.register(obj)
+        return setup
+
     def get_implicit_objects(self) -> List[Object]:
         """
         Returns a list of objects that are not managed (created, updated, dropped) by us,
