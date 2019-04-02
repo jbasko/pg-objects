@@ -1,11 +1,13 @@
+from .objects.database import DatabasePrivilegeStateProvider
 from .connection import get_connection, Connection
-from .state_providers.base import DatabasePrivilegeStateProvider
 
 
 class State(
     DatabasePrivilegeStateProvider
 ):
     def __init__(self, master_connection: Connection = None):
+        if master_connection is None:
+            master_connection = get_connection()
         self.master_connection: Connection = master_connection
 
     def load_all(self):
@@ -16,5 +18,5 @@ class State(
 
 
 if __name__ == "__main__":
-    state = State(master_connection=get_connection())
+    state = State()
     state.load_all()

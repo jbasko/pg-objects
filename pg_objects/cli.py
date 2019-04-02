@@ -5,8 +5,7 @@ from aarghparse import cli
 
 from .utils import generate_password, get_password_md5
 from .connection import get_connection
-from .objects import Setup
-
+from .setup import Setup
 
 log = logging.getLogger(__name__)
 

@@ -1,9 +1,10 @@
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
-
 from pg_objects.connection import get_connection
-from pg_objects.objects import Setup
+from pg_objects.setup import Setup
+
+
+logging.basicConfig(level=logging.DEBUG)
 
 setup = Setup(master_connection=get_connection())
 
@@ -21,7 +22,7 @@ setup.schema(database="existingdb", name="existingschema", owner="devops", prese
 setup.schema(database="datascience", name="private", owner="devops", present=True)
 
 setup.database_privilege(database="existingdb", grantee="datascience", privileges=["CONNECT", "TEMP"], present=False)
-setup.database_privilege(database="existingdb", grantee="devops", privileges="ALL", present=True)
+setup.database_privilege(database="existingdb", grantee="devops", privileges="ALL", present=False)
 
 setup.schema_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=False)
 
@@ -29,5 +30,5 @@ setup.schema_tables_privilege(database="existingdb", schema="existingschema", gr
 y = setup.schema_tables_privilege(database="existingdb", schema="existingschema", grantee="devops", privileges="ALL", present=True)
 setup.default_privilege(privilege=y, grantor="datascience", present=False)
 
-setup.execute(dry_run=True)
+setup.execute(dry_run=False)
 # setup.inspect()
