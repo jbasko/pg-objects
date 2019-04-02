@@ -1,11 +1,10 @@
 import json
 import logging
-import os
 
 from aarghparse import cli
 
 from pg_objects.utils import generate_password, get_password_md5
-from .connection import Connection
+from .connection import get_connection
 from .objects import Setup
 
 
@@ -26,19 +25,9 @@ def pg_objects_cli(parser, subcommand):
         default="INFO",
     )
 
-    def get_connection(args) -> Connection:
-        prefix = args.env_prefix
-        return Connection(
-            host=os.environ.get(f"{prefix}HOST", ""),
-            port=os.environ.get(f"{prefix}PORT", "5432"),
-            database=os.environ.get(f"{prefix}DATABASE", "postgres"),
-            username=os.environ.get(f"{prefix}USER", "postgres"),
-            password=os.environ.get(f"{prefix}PASSWORD", ""),
-        )
-
     def setup_from_definition(definition_str: str, args) -> Setup:
         definition = json.loads(definition_str)
-        connection = get_connection(args)
+        connection = get_connection(env_prefix=args.env_prefix)
         return Setup.from_definition(definition, master_connection=connection)
 
     def configure_logging(args):

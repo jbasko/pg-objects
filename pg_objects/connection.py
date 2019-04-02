@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import textwrap
 from typing import Any, Dict, Generator, Optional
@@ -226,3 +227,25 @@ class Transaction:
     def execute(self, query, *query_args):
         self.db.log_query(query)
         self.cursor.execute(query, *query_args)
+
+
+def get_connection(env_prefix="PGO_", defaults: Dict = None, overrides: Dict = None) -> Connection:
+    """
+    Creates a new connection based on environment variables with the specified prefix.
+    Precedence order:
+        1) overrides
+        2) environment variables
+        3) defaults passed
+        4) default defaults
+    """
+    defaults = defaults or {}
+    defaults.setdefault("host", "")
+    defaults.setdefault("port", "5432")
+    defaults.setdefault("database", "postgres")
+    defaults.setdefault("username", "postgres")
+    defaults.setdefault("password", "")
+    overrides = overrides or {}
+    kwargs = {}
+    for k in defaults.keys():
+        kwargs[k] = overrides.get(k, os.environ.get(f"{env_prefix}{k.upper()}", defaults[k]))
+    return Connection(**kwargs)

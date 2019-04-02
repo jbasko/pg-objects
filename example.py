@@ -1,18 +1,11 @@
 import logging
-import os
 
 logging.basicConfig(level=logging.DEBUG)
 
-from pg_objects.connection import Connection
+from pg_objects.connection import get_connection
 from pg_objects.objects import Setup
 
-setup = Setup(master_connection=Connection(
-    host=os.environ.get("PGO_HOST", "localhost"),
-    port=os.environ.get("PGO_PORT", "5432"),
-    username=os.environ["PGO_USERNAME"],
-    password=os.environ.get("PGO_PASSWORD", ""),
-    database=os.environ.get("PGO_DATABASE", "postgres")),
-)
+setup = Setup(master_connection=get_connection())
 
 
 devops = setup.group(name="devops", present=True)
