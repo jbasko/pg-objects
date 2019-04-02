@@ -4,6 +4,7 @@ import os
 
 from aarghparse import cli
 
+from pg_objects.utils import generate_password, get_password_md5
 from .connection import Connection
 from .objects import Setup
 
@@ -66,6 +67,18 @@ def pg_objects_cli(parser, subcommand):
         configure_logging(args)
         setup = setup_from_definition(definition_str=args.definition, args=args)
         setup.execute(dry_run=args.dry_run)
+
+    @subcommand(args=[
+        ["username"],
+        ["--password", {"help": "Pass a specific password that you want to calculate MD5 for"}]
+    ])
+    def password(args):
+        if args.password:
+            password = args.password
+        else:
+            password = generate_password()
+        password_md5 = get_password_md5(username=args.username, password=password)
+        print(f"Username: {args.username}\nPassword: {password}\nPassword MD5: {password_md5}")
 
 
 if __name__ == "__main__":

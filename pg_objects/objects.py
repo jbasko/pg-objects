@@ -1,10 +1,10 @@
 import collections
-import hashlib
 import logging
 from typing import List, Generator, Hashable, Dict, Tuple, Union, ClassVar, Optional, Set, Collection, Type
 
 from .connection import Connection
 from .graph import Graph
+from .utils import get_password_md5
 
 
 log = logging.getLogger(__name__)
@@ -286,7 +286,7 @@ class User(Role):
             if self.password.startswith("md5"):
                 password_hash = self.password
             else:
-                password_hash = "md5" + hashlib.md5(f"{self.password}{self.name}".encode()).hexdigest()
+                password_hash = get_password_md5(username=self.name, password=self.password)
             password_sql = f"LOGIN PASSWORD '{password_hash}'"
         return password_sql
 
@@ -1281,7 +1281,7 @@ class Setup:
             if isinstance(statement, TransactionOfStatements):
                 with connection.begin() as tx:
                     for stmt in statement.statements:
-                        assert stmt.database == connection.database
+                        assert stmt.database is None or stmt.database == connection.database
                         tx.execute(stmt.query, *stmt.params)
             else:
                 connection.execute(statement.query, *statement.params)
