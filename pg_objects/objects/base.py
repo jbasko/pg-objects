@@ -56,6 +56,10 @@ class StateProviderAbc(abc.ABC):
     def master_connection(self) -> Connection:
         return self.connection_manager.master_connection
 
+    @property
+    def mc(self) -> Connection:
+        return self.master_connection
+
     def get_connection(self, database: str) -> Connection:
         return self.connection_manager.get_connection(database=database)
 

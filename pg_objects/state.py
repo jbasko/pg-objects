@@ -1,5 +1,6 @@
 from .objects.base import ConnectionManager
 from .objects.database import DatabasePrivilegeStateProvider
+from .objects.role import RoleStateProvider
 from .objects.schema import SchemaTablesStateProvider
 from .connection import Connection, get_connection
 
@@ -7,6 +8,7 @@ from .connection import Connection, get_connection
 class State(
     DatabasePrivilegeStateProvider,
     SchemaTablesStateProvider,
+    RoleStateProvider,
 ):
     def __init__(self, connection_manager: ConnectionManager = None, master_connection: Connection = None):
         if connection_manager:

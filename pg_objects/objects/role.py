@@ -1,9 +1,10 @@
+import collections
 from typing import List, Generator
 
 from ..graph import Graph
 from ..statements import CreateStatement, DropStatement, Statement, TextStatement
 from ..utils import get_password_md5
-from .base import Object, ObjectLink, SetupAbc
+from .base import Object, ObjectLink, SetupAbc, StateProviderAbc, ObjectState
 
 
 class Role(Object):
@@ -118,3 +119,78 @@ class GroupUser(ObjectLink):
 
     def stmts_to_drop(self):
         yield TextStatement(f"ALTER GROUP {self.group} DROP USER {self.user}")
+
+
+class RoleStateProvider(StateProviderAbc):
+    _rsp_groups = None
+    _rsp_users = None
+    _rsp_group_users = None
+    _rsp_user_groups = None
+
+    @property
+    def groups(self):
+        if self._rsp_groups is None:
+            self.load_groups_and_users()
+        return self._rsp_groups
+
+    @property
+    def users(self):
+        if self._rsp_users is None:
+            self.load_groups_and_users()
+        return self._rsp_users
+
+    @property
+    def group_users(self):
+        if self._rsp_group_users is None:
+            self.load_groups_and_users()
+        return self._rsp_group_users
+
+    @property
+    def user_groups(self):
+        if self._rsp_user_groups is None:
+            self.load_groups_and_users()
+        return self._rsp_user_groups
+
+    def get_user(self, obj: User) -> ObjectState:
+        return ObjectState.IS_PRESENT if obj.name in self._rsp_users else ObjectState.IS_ABSENT
+
+    def get_group(self, obj: Group) -> ObjectState:
+        return ObjectState.IS_PRESENT if obj.name in self._rsp_groups else ObjectState.IS_ABSENT
+
+    def get_groupuser(self, obj: GroupUser) -> ObjectState:
+        return ObjectState.IS_PRESENT if obj.user in self._rsp_group_users[obj.group] else ObjectState.IS_ABSENT
+
+    def load_groups_and_users(self):
+        self._rsp_groups = {}
+        self._rsp_users = {}
+        self._rsp_group_users = collections.defaultdict(list)
+        self._rsp_user_groups = collections.defaultdict(list)
+
+        for raw in self.mc.execute("SELECT groname AS name FROM pg_group").get_all("name"):
+            if raw["name"].startswith("pg_"):
+                continue
+            self._rsp_groups[raw["name"]] = raw
+
+        # Always register the public group
+        self._rsp_groups["public"] = {"name": "public"}
+
+        for raw in self.mc.execute("SELECT rolname AS name FROM pg_roles").get_all("name"):
+            if raw["name"].startswith("pg_") or raw["name"] in self._rsp_groups:
+                # pg_roles contains both users and groups so the only way to distinguish
+                # them is by checking which ones are not groups.
+                continue
+            self._rsp_users[raw["name"]] = raw
+
+        raw_rows = self.mc.execute(f"""
+            SELECT
+            pg_group.groname,
+            pg_roles.rolname
+            FROM pg_group
+            LEFT JOIN pg_roles ON pg_roles.oid = ANY(pg_group.grolist)
+            WHERE pg_group.groname NOT LIKE 'pg_%%'
+            ORDER BY pg_group.groname, pg_roles.rolname
+        """).get_all("groname", "rolname")
+        for raw in raw_rows:
+            if raw["rolname"]:
+                self._rsp_group_users[raw["groname"]].append(raw["rolname"])
+                self._rsp_user_groups[raw["rolname"]].append(raw["groname"])

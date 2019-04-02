@@ -40,10 +40,6 @@ class ServerState(State):
                 )
             )
         )
-        self.groups = {}
-        self.users = {}
-        self.group_users = collections.defaultdict(list)
-        self.user_groups = collections.defaultdict(list)
 
     def get(self, obj: Object):
         getter = getattr(self, f"get_{obj.__class__.__name__.lower()}", None)
@@ -108,15 +104,6 @@ class ServerState(State):
             if priv.schema not in self.schemas[priv.database]:
                 return ObjectState.IS_ABSENT
         return ObjectState.IS_UNKNOWN
-
-    def get_user(self, obj: User) -> ObjectState:
-        return ObjectState.IS_PRESENT if obj.name in self.users else ObjectState.IS_ABSENT
-
-    def get_group(self, obj: Group) -> ObjectState:
-        return ObjectState.IS_PRESENT if obj.name in self.groups else ObjectState.IS_ABSENT
-
-    def get_groupuser(self, obj: GroupUser) -> ObjectState:
-        return ObjectState.IS_PRESENT if obj.user in self.group_users[obj.group] else ObjectState.IS_ABSENT
 
     def get_schema(self, obj: Schema) -> ObjectState:
         if obj.database in self.schemas:
@@ -310,35 +297,6 @@ class Setup(SetupAbc):
     def _load_server_state(self):
         state = ServerState(connection_manager=self.connection_manager)
         state.load_all()
-
-        for raw in self._mc.execute("SELECT groname AS name FROM pg_group").get_all("name"):
-            if raw["name"].startswith("pg_"):
-                continue
-            state.groups[raw["name"]] = raw
-
-        # Always register the public group
-        state.groups["public"] = {"name": "public"}
-
-        for raw in self._mc.execute("SELECT rolname AS name FROM pg_roles").get_all("name"):
-            if raw["name"].startswith("pg_") or raw["name"] in state.groups:
-                # pg_roles contains both users and groups so the only way to distinguish
-                # them is by checking which ones are not groups.
-                continue
-            state.users[raw["name"]] = raw
-
-        raw_rows = self._mc.execute(f"""
-            SELECT
-            pg_group.groname,
-            pg_roles.rolname
-            FROM pg_group
-            LEFT JOIN pg_roles ON pg_roles.oid = ANY(pg_group.grolist)
-            WHERE pg_group.groname NOT LIKE 'pg_%%'
-            ORDER BY pg_group.groname, pg_roles.rolname
-        """).get_all("groname", "rolname")
-        for raw in raw_rows:
-            if raw["rolname"]:
-                state.group_users[raw["groname"]].append(raw["rolname"])
-                state.user_groups[raw["rolname"]].append(raw["groname"])
 
         raw_rows = self._mc.execute(f"""
             SELECT d.datname as name,
