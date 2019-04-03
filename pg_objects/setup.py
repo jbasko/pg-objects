@@ -1,14 +1,13 @@
-import collections
 import logging
 from typing import Dict, Hashable, List, Optional, Union, Generator
 
 from .connection import Connection
 from .graph import Graph
 from .objects.base import Object, ObjectState, SetupAbc, ObjectLink, ConnectionManager
-from .objects.database import Database, DatabaseOwner, DatabasePrivilege
+from .objects.database import Database, DatabasePrivilege
 from .objects.default_privilege import DefaultPrivilege
-from .objects.role import User, Group, GroupUser
-from .objects.schema import SchemaPrivilege, SchemaTablesPrivilege, Schema, SchemaOwner
+from .objects.role import User, Group
+from .objects.schema import SchemaPrivilege, SchemaTablesPrivilege, Schema
 from .state import State
 from .statements import Statement, TransactionOfStatements, DropStatement
 
@@ -16,120 +15,11 @@ from .statements import Statement, TransactionOfStatements, DropStatement
 log = logging.getLogger(__name__)
 
 
-class ServerState(State):
-    def __init__(self, connection_manager: ConnectionManager):
-        super().__init__(connection_manager=connection_manager)
-
-        self.databases = {}
-
-        # [database][schema] => {}
-        self.schemas = collections.defaultdict(dict)
-
-        # [database][schema][grantee] => Set[privileges]
-        self.schema_privileges = collections.defaultdict(
-            lambda: collections.defaultdict(
-                lambda: collections.defaultdict(set)
-            )
-        )
-
-        # [database][schema][grantee][table] => Set[privileges]
-        self.schema_tables_privileges = collections.defaultdict(
-            lambda: collections.defaultdict(
-                lambda: collections.defaultdict(
-                    lambda: collections.defaultdict(set)
-                )
-            )
-        )
-
-    def get(self, obj: Object):
-        getter = getattr(self, f"get_{obj.__class__.__name__.lower()}", None)
-        if getter is None:
-            log.warning(f"Requested current state for unsupported object type {obj.__class__}, returning IS_UNKNOWN")
-            return ObjectState.IS_UNKNOWN
-        return getter(obj)
-
-    def get_database(self, obj: Database):
-        return ObjectState.IS_PRESENT if obj.name in self.databases else ObjectState.IS_ABSENT
-
-    def get_databaseowner(self, obj: DatabaseOwner):
-        if obj.database not in self.databases:
-            return ObjectState.IS_ABSENT
-        elif self.databases[obj.database]["owner"] == obj.owner:
-            return ObjectState.IS_PRESENT
-        else:
-            # TODO (IS_DIFFERENT)
-            # Technically, it is IS_DIFFERENT, but for DatabaseOwner IS_ABSENT is okay
-            # and we don't support IS_DIFFERENT yet
-            return ObjectState.IS_ABSENT
-
-    def get_schemaprivilege(self, obj: SchemaPrivilege) -> ObjectState:
-        sp = self.schema_privileges
-        if obj.database in sp:
-            if obj.schema in sp[obj.database]:
-                if obj.grantee in sp[obj.database][obj.schema]:
-                    if obj.privileges == sp[obj.database][obj.schema][obj.grantee]:
-                        return ObjectState.IS_PRESENT
-                    else:
-                        return ObjectState.IS_DIFFERENT
-        return ObjectState.IS_ABSENT
-
-    def get_schematablesprivilege(self, obj: SchemaTablesPrivilege) -> ObjectState:
-        stp = self.schema_tables_privileges
-        if obj.database in stp:
-            if obj.schema in stp[obj.database]:
-                tables = self.schema_tables[obj.database][obj.schema]
-                if obj.grantee in stp[obj.database][obj.schema]:
-                    # Have to check that privileges for each existing table match the expected ones
-                    if all(stp[obj.database][obj.schema][obj.grantee][t] == obj.privileges for t in tables):
-                        return ObjectState.IS_PRESENT
-                    else:
-                        return ObjectState.IS_DIFFERENT
-        return ObjectState.IS_ABSENT
-
-    def get_defaultprivilege(self, obj: DefaultPrivilege) -> ObjectState:
-        """
-        TODO This is an incomplete implementation of current state of default privileges --
-        TODO the actual state is not loaded, we just use the absence of schemas or roles
-        TODO as an indicator that the default privilege is surely absent.
-        TODO This is needed because the default state IS_UNKNOWN means that we should
-        TODO attempt to revoke the privileges every time they are requested absent
-        TODO but that would throw errors if schemas or roles don't exist.
-        """
-        priv = obj.privilege
-        if obj.grantor not in self.groups and obj.grantor not in self.users:
-            return ObjectState.IS_ABSENT
-        if isinstance(priv, SchemaTablesPrivilege):
-            if priv.database not in self.schemas:
-                return ObjectState.IS_ABSENT
-            if priv.schema not in self.schemas[priv.database]:
-                return ObjectState.IS_ABSENT
-        return ObjectState.IS_UNKNOWN
-
-    def get_schema(self, obj: Schema) -> ObjectState:
-        if obj.database in self.schemas:
-            if obj.name in self.schemas[obj.database]:
-                return ObjectState.IS_PRESENT
-        return ObjectState.IS_ABSENT
-
-    def get_schemaowner(self, obj: SchemaOwner) -> ObjectState:
-        if obj.database in self.schemas:
-            if obj.schema in self.schemas[obj.database]:
-                current = self.schemas[obj.database][obj.schema]
-                if obj.owner == current["owner"]:
-                    return ObjectState.IS_PRESENT
-                else:
-                    # TODO (IS_DIFFERENT)
-                    # It's okay to report it as absent,
-                    # we don't support IS_DIFFERENT yet
-                    return ObjectState.IS_ABSENT
-        return ObjectState.IS_ABSENT
-
-
 class Setup(SetupAbc):
     def __init__(self, master_connection: Connection = None):
         self._objects: Dict[Hashable, Object] = {}
 
-        self._server_state: ServerState = None
+        self._server_state: State = None
 
         self.connection_manager = ConnectionManager(master_connection=master_connection)
 
@@ -137,7 +27,7 @@ class Setup(SetupAbc):
             self.register(obj)
 
     @property
-    def _mc(self) -> Connection:
+    def mc(self) -> Connection:
         return self.connection_manager.master_connection
 
     def get_connection(self, database: str = None) -> Connection:
@@ -176,8 +66,8 @@ class Setup(SetupAbc):
         Master user becomes the owner of objects owned by to be dropped owners
         for which no new owner is set.
         """
-        if self._mc:
-            return self._mc.username
+        if self.mc:
+            return self.mc.username
         return None
 
     @property
@@ -185,8 +75,8 @@ class Setup(SetupAbc):
         """
         Master database (postgres) is not managed, but some revokes should be issued in that.
         """
-        if self._mc:
-            return self._mc.database
+        if self.mc:
+            return self.mc.database
         return None
 
     @property
@@ -295,83 +185,8 @@ class Setup(SetupAbc):
         return [vertex.value for vertex in self.generate_graph().topological_sort_by_kahn()]
 
     def _load_server_state(self):
-        state = ServerState(connection_manager=self.connection_manager)
+        state = State(connection_manager=self.connection_manager)
         state.load_all()
-
-        raw_rows = self._mc.execute(f"""
-            SELECT d.datname as name,
-            pg_catalog.pg_get_userbyid(d.datdba) as owner
-            FROM pg_catalog.pg_database d
-            WHERE d.datname NOT LIKE 'template%%'
-            AND d.datname != 'postgres'
-        """).get_all("name", "owner")
-        for raw in raw_rows:
-            state.databases[raw["name"]] = raw
-
-        for datname in state.databases.keys():
-            if datname not in self.managed_databases:
-                # Do not attempt to connect to or in any other way manage
-                # databases which are not mentioned in the objects.
-                continue
-            conn = self.get_connection(datname)
-            raw_rows = conn.execute(f"""
-                SELECT
-                pg_namespace.nspname AS name,
-                pg_roles.rolname AS owner
-                FROM pg_namespace
-                LEFT JOIN pg_roles ON pg_namespace.nspowner = pg_roles.oid
-                WHERE pg_namespace.nspname != 'information_schema' AND
-                pg_namespace.nspname NOT LIKE 'pg_%'
-                ORDER BY pg_namespace.nspname
-            """).get_all("name", "owner")
-            for raw in raw_rows:
-                state.schemas[datname][raw["name"]] = {
-                    "database": datname, "name": raw["name"], "owner": raw["owner"],
-                }
-
-        for datname in state.databases.keys():
-            if datname not in self.managed_databases:
-                continue
-            conn = self.get_connection(datname)
-
-            #
-            # Load schema privileges
-            #
-            for priv_type in SchemaPrivilege.ALL:
-                raw_rows = conn.execute(f"""
-                    SELECT
-                        r.rolname,
-                        (
-                            SELECT STRING_AGG(s.nspname, ',' ORDER BY s.nspname)
-                            FROM pg_namespace s 
-                            WHERE HAS_SCHEMA_PRIVILEGE(r.rolname, s.nspname, %s)
-                            AND s.nspname != 'information_schema'
-                            AND NOT s.nspname LIKE 'pg_%%'
-                        ) AS schemas
-                    FROM pg_roles r
-                    WHERE NOT r.rolcanlogin AND NOT (r.rolname LIKE 'pg_%%')
-                    ORDER BY r.rolname
-                """, priv_type).get_all("rolname", "schemas")
-                for raw in raw_rows:
-                    if not raw["schemas"]:
-                        continue
-                    for schemaname in raw["schemas"].split(","):
-                        state.schema_privileges[datname][schemaname][raw["rolname"]].add(priv_type)
-
-            #
-            # Load schema tables privileges
-            #
-            raw_rows = conn.execute(f"""
-                SELECT
-                grantee, table_schema, table_name, STRING_AGG(privilege_type, ',') AS privileges
-                FROM information_schema.role_table_grants
-                WHERE table_schema != 'information_schema' AND NOT table_schema LIKE 'pg_%'
-                GROUP BY grantee, table_schema, table_name;
-            """).get_all("grantee", "table_schema", "table_name", "privileges")
-            for raw in raw_rows:
-                if not raw["privileges"]:
-                    continue
-                state.schema_tables_privileges[datname][raw["table_schema"]][raw["grantee"]][raw["table_name"]] = set(raw["privileges"].split(","))
 
         # TODO Return instead of storing on instance so that it could be reloaded
         self._server_state = state

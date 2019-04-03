@@ -119,10 +119,44 @@ class DatabasePrivilege(Object):
         """)
 
 
+class DatabaseStateProvider(StateProviderAbc):
+    _dsp_databases = None
+
+    @property
+    def databases(self):
+        if self._dsp_databases is None:
+            self.load_databases()
+        return self._dsp_databases
+
+    def load_databases(self):
+        self._dsp_databases = {}
+
+        raw_rows = self.mc.execute(f"""
+            SELECT d.datname as name,
+            pg_catalog.pg_get_userbyid(d.datdba) as owner
+            FROM pg_catalog.pg_database d
+            WHERE d.datname NOT LIKE 'template%%'
+            AND d.datname != 'postgres'
+        """).get_all("name", "owner")
+        for raw in raw_rows:
+            self._dsp_databases[raw["name"]] = raw
+
+    def get_database(self, obj: Database):
+        return ObjectState.IS_PRESENT if obj.name in self._dsp_databases else ObjectState.IS_ABSENT
+
+    def get_databaseowner(self, obj: DatabaseOwner):
+        if obj.database not in self.databases:
+            return ObjectState.IS_ABSENT
+        elif self.databases[obj.database]["owner"] == obj.owner:
+            return ObjectState.IS_PRESENT
+        else:
+            return ObjectState.IS_DIFFERENT
+
+
 class DatabasePrivilegeStateProvider(StateProviderAbc):
 
-    _dpp_db_privs: Dict = None
-    _dpp_db_privs_lookup = {
+    _dpsp_db_privs: Dict = None
+    _dpsp_db_privs_lookup = {
         "c": "CONNECT",
         "C": "CREATE",
         "T": "TEMPORARY",
@@ -133,20 +167,20 @@ class DatabasePrivilegeStateProvider(StateProviderAbc):
         """
         [datname][grantee] => Set[privilege]
         """
-        if self._dpp_db_privs is None:
+        if self._dpsp_db_privs is None:
             self.load_database_privileges()
-        return self._dpp_db_privs
+        return self._dpsp_db_privs
 
     def _has_database_privileges(self, database, grantee) -> bool:
-        if database in self._dpp_db_privs:
-            if grantee in self._dpp_db_privs[database]:
+        if database in self._dpsp_db_privs:
+            if grantee in self._dpsp_db_privs[database]:
                 return True
         return False
 
     def _get_database_privileges(self, database, grantee) -> Set[str]:
-        if database in self._dpp_db_privs:
-            if grantee in self._dpp_db_privs[database]:
-                return self._dpp_db_privs[database][grantee]
+        if database in self._dpsp_db_privs:
+            if grantee in self._dpsp_db_privs[database]:
+                return self._dpsp_db_privs[database][grantee]
         return set()
 
     def get_databaseprivilege(self, obj: DatabasePrivilege) -> ObjectState:
@@ -156,7 +190,7 @@ class DatabasePrivilegeStateProvider(StateProviderAbc):
         return ObjectState.IS_PRESENT if obj.privileges == privileges else ObjectState.IS_DIFFERENT
 
     def load_database_privileges(self):
-        self._dpp_db_privs = collections.defaultdict(
+        self._dpsp_db_privs = collections.defaultdict(
             lambda: collections.defaultdict(set)
         )
 
@@ -165,6 +199,6 @@ class DatabasePrivilegeStateProvider(StateProviderAbc):
             WHERE datname NOT LIKE 'template%%'
         """).get_all("datname", "datacl"):
             for (grantee, privs, grantor) in parse_datacl(row["datacl"]):
-                self._dpp_db_privs[row["datname"]][grantee].update(
-                    self._dpp_db_privs_lookup[p] for p in privs
+                self._dpsp_db_privs[row["datname"]][grantee].update(
+                    self._dpsp_db_privs_lookup[p] for p in privs
                 )

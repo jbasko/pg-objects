@@ -1,7 +1,8 @@
 from unittest import mock
 
 from pg_objects.objects.database import DatabasePrivilege
-from pg_objects.setup import ServerState, Setup
+from pg_objects.setup import Setup
+from pg_objects.state import State
 
 
 def test_simple_setup():
@@ -15,12 +16,6 @@ def test_simple_setup():
 
     setup.database("datascience", owner="datascience")
     setup.schema(database="datascience", name="private", owner="datascience")
-
-    # Fake state
-    setup._server_state = ServerState(connection_manager=mock.Mock())
-
-    for stmt in setup._generate_stmts():
-        print(stmt)
 
 
 def test_database_privilege():

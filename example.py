@@ -10,12 +10,12 @@ setup = Setup(master_connection=get_connection())
 
 
 devops = setup.group(name="devops", present=True)
-datascience = setup.group(name="datascience", present=False)
+datascience = setup.group(name="datascience", present=True)
 
 datascience_db = setup.database("datascience", owner=devops.name, present=True)
 existingdb = setup.database("existingdb", present=True)
 
-setup.user(name="johnny", password="johnny", groups=["datascience"], present=False)
+setup.user(name="johnny", password="johnny", groups=["datascience"], present=True)
 setup.user(name="peter", password="peter", groups=["devops"], present=True)
 
 setup.schema(database="existingdb", name="existingschema", owner="devops", present=True)
