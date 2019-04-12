@@ -82,7 +82,7 @@ class User(Role):
         inherit_sql = "INHERIT" if self.inherit else "NOINHERIT"
         yield TextStatement(f"""
             ALTER USER {self.name}
-            WITH NOCREATEDB NOSUPERUSER
+            WITH NOCREATEDB
             {inherit_sql}
             {self.get_password_sql()}
         """)
