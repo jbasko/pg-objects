@@ -131,12 +131,15 @@ class DatabaseStateProvider(StateProviderAbc):
     def load_databases(self):
         self._dsp_databases = {}
 
+        # We quietly discard databases which we cannot connect to as master user.
+        # This happens on Amazon RDS where your master user can see "rdsadmin" database which they cannot connect to.
         raw_rows = self.mc.execute(f"""
-            SELECT d.datname as name,
-            pg_catalog.pg_get_userbyid(d.datdba) as owner
+            SELECT d.datname AS name,
+            pg_catalog.pg_get_userbyid(d.datdba) AS owner
             FROM pg_catalog.pg_database d
             WHERE d.datname NOT LIKE 'template%%'
             AND d.datname != 'postgres'
+            AND HAS_DATABASE_PRIVILEGE('{self.mc.username}', d.datname, 'CONNECT')
         """).get_all("name", "owner")
         for raw in raw_rows:
             self._dsp_databases[raw["name"]] = raw
