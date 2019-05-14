@@ -164,6 +164,8 @@ class Setup(SetupAbc):
             return user
         if rolname.lower() == "public":
             return Group("public")
+        elif rolname == self.master_user:
+            return User(rolname)
         raise ValueError(
             f"Ambiguous role {rolname!r} - "
             f"declare it as Group or User before referencing it in another object"
