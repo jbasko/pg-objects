@@ -2,7 +2,6 @@ from unittest import mock
 
 from pg_objects.objects.database import DatabasePrivilege
 from pg_objects.setup import Setup
-from pg_objects.state import State
 
 
 def test_simple_setup():
