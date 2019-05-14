@@ -39,8 +39,6 @@ class DefaultPrivilege(Object):
 
     def __init__(self, privilege: DefaultPrivilegeReady, grantor: str, present: bool = True, setup: SetupAbc = None):
         super().__init__(name=None, present=present, setup=setup)
-        if isinstance(privilege, dict):
-            privilege = DefaultPrivilegeReady(**privilege)
         self.privilege = privilege
         self.grantor = grantor
         self.dependencies.add(self.privilege)
