@@ -1,4 +1,4 @@
-from typing import Set, ClassVar
+from typing import Set, ClassVar, Dict, Union
 
 from ..statements import TextStatement, TransactionOfStatements
 from .base import Object, SetupAbc
@@ -37,8 +37,15 @@ class DefaultPrivilege(Object):
     privilege: DefaultPrivilegeReady
     grantor: str
 
-    def __init__(self, privilege: DefaultPrivilegeReady, grantor: str, present: bool = True, setup: SetupAbc = None):
+    def __init__(
+        self,
+        privilege: Union[DefaultPrivilegeReady, Dict], grantor: str,
+        present: bool = True, setup: SetupAbc = None,
+    ):
         super().__init__(name=None, present=present, setup=setup)
+        if isinstance(privilege, dict):
+            from ..registry import deserialise_object
+            privilege = deserialise_object(**privilege, setup=setup)
         self.privilege = privilege
         self.grantor = grantor
         self.dependencies.add(self.privilege)

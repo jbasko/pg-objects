@@ -8,6 +8,7 @@ from .objects.database import Database, DatabasePrivilege
 from .objects.default_privilege import DefaultPrivilege
 from .objects.role import User, Group
 from .objects.schema import SchemaPrivilege, SchemaTablesPrivilege, Schema
+from .registry import deserialise_object
 from .state import State
 from .statements import Statement, TransactionOfStatements, DropStatement
 
@@ -36,15 +37,8 @@ class Setup(SetupAbc):
     @classmethod
     def from_definition(cls, definition: Dict, master_connection: Connection = None) -> "Setup":
         setup = cls(master_connection=master_connection)
-        types = {}
-        for k, v in globals().items():
-            if isinstance(v, type) and issubclass(v, Object):
-                types[k] = v
         for raw in definition["objects"]:
-            obj_type_name = raw.pop("type")
-            obj_type = types[obj_type_name]
-            obj = obj_type(**raw, setup=setup)
-            setup.register(obj)
+            setup.register(deserialise_object(**raw, setup=setup))
         return setup
 
     def get_implicit_objects(self) -> List[Object]:

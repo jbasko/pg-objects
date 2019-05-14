@@ -47,3 +47,15 @@ def test_default_privilege_example():
     assert dp.privilege.database == "db"
     assert dp.privilege.schema == "sch"
     assert dp.privilege.grantee == "datascience"
+
+    dp2 = DefaultPrivilege(
+        grantor="postgres",
+        privilege=dict(
+            type="SchemaTablesPrivilege",
+            database="db",
+            schema="sch",
+            grantee="datascience",
+            privileges="ALL",
+        )
+    )
+    assert dp == dp2
