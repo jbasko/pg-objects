@@ -52,6 +52,7 @@ class Setup(SetupAbc):
             # We need to revoke some privileges which are assigned to it by default
             # in all new databases.
             Group(name="public"),
+            User(name=self.master_user),
         ]
 
     @property
@@ -151,7 +152,7 @@ class Setup(SetupAbc):
         return stp
 
     def default_privilege(self, **kwargs) -> DefaultPrivilege:
-        def_priv = DefaultPrivilege(**kwargs)
+        def_priv = DefaultPrivilege(**kwargs, setup=self)
         self.register(def_priv)
         return def_priv
 

@@ -29,6 +29,7 @@ setup.schema_privilege(database="existingdb", schema="existingschema", grantee="
 setup.schema_tables_privilege(database="existingdb", schema="existingschema", grantee="datascience", privileges="ALL", present=False)
 y = setup.schema_tables_privilege(database="existingdb", schema="existingschema", grantee="devops", privileges="ALL", present=True)
 setup.default_privilege(privilege=y, grantor="datascience", present=False)
+setup.default_privilege(privilege=y, grantor=setup.master_user, present=True)
 
 setup.execute(dry_run=False)
 # setup.inspect()
