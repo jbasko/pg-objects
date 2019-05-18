@@ -1,5 +1,28 @@
 # pg-objects
 
+Create PostgreSQL databases, schemas, and roles; grant and revoke privileges.
+
+There is no PyPI package for this as I have released quite a few in the past only to discover
+months down the line that perhaps they are not as useful as they seemed to be. Use this at your
+own risk.
+
+First blog post on the subject: https://notes.zilupe.com/posts/pg_objects/
+
+## Usage
+
+A working Python example is in ``example.py``.
+
+Command-line interface (CLI): ``python -m pg_objects.cli --help``
+
+CLI can be passed a JSON representation of the object graph and it will create all the 
+managed objects for you.
+
+This does not work on Amazon RDS for PostgreSQL because Amazon have bastardised the database
+and you don't have a super user. Don't use Amazon RDS for PostgreSQL unless you want to have
+a separate cluster for each use case and pay accordingly.
+
+## Story
+
 I have been trying to express PostgreSQL and Redshift permission objects declaratively 
 for the last year and a half. This is roughly what I am after: 
 
@@ -16,7 +39,7 @@ Objects:
 
 The greatest challenge so far has been to create and drop all the objects in the right
 order. Recently I realised that if the object dependencies are expressed 
-in a graph then topological sort can be used to calculate the order the operations.
+in a graph then topological sort can be used to calculate the order of the operations.
 For create operations we process objects in topological order, and for drop operations we
 process them in reverse topological order.
 
@@ -54,9 +77,9 @@ TopologicalOrder:
     - DatabaseOwner:d+u
 ```
 
-Another major problem is how privileges such as `ON ALL TABLES` apply only to existing tables and for
+Another major problem is how privileges such as `ON ALL TABLES` apply only to existing tables. For
 tables created later one must `ALTER DEFAULT PRIVILEGES` which require knowing in advance who is going
-to create the objects (tables) to which the default privileges apply.
+to create the objects (tables) to which these default privileges apply.
 
 ### Permissions Model
 
@@ -91,8 +114,3 @@ DETAIL:  User does not have CONNECT privilege.
 ```
 
 This forces us to declare `CONNECT` privilege on individual users.
-
-### TODO
-
-* Explore allowing references to `PUBLIC` group in the object graph. That would require
-  conditional logic in group create/drop methods to ignore any operations on the `PUBLIC` group.
